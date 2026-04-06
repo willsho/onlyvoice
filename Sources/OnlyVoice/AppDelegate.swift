@@ -27,7 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Register defaults
         UserDefaults.standard.register(defaults: [
             "selected_language": "zh-CN",
-            "dashscope_model": "qwen-omni-turbo-latest"
+            "dashscope_model": "qwen3.5-omni-plus-realtime"
         ])
 
         setupMainMenu()

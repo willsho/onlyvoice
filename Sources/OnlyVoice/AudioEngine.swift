@@ -14,6 +14,8 @@ final class AudioEngine {
     /// Audio format: 16kHz mono PCM16
     private let sampleRate: Double = 16000
     private let channelCount: AVAudioChannelCount = 1
+    private var converter: AVAudioConverter?
+    private var targetFormat: AVAudioFormat?
 
     func start() throws {
         guard !isRunning else { return }
@@ -36,10 +38,12 @@ final class AudioEngine {
             throw NSError(domain: "AudioEngine", code: -2,
                           userInfo: [NSLocalizedDescriptionKey: "Cannot create target audio format"])
         }
+        self.targetFormat = targetFormat
+        self.converter = AVAudioConverter(from: hwFormat, to: targetFormat)
 
-        // Install tap with converter
-        inputNode.installTap(onBus: 0, bufferSize: 1600, format: targetFormat) { [weak self] buffer, _ in
-            self?.processBuffer(buffer)
+        // Tap MUST use the input node's native hardware format; convert inside the callback.
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [weak self] buffer, _ in
+            self?.handleInputBuffer(buffer)
         }
 
         engine.prepare()
@@ -52,6 +56,30 @@ final class AudioEngine {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         isRunning = false
+    }
+
+    private func handleInputBuffer(_ inputBuffer: AVAudioPCMBuffer) {
+        guard let converter = converter, let targetFormat = targetFormat else { return }
+
+        let ratio = targetFormat.sampleRate / inputBuffer.format.sampleRate
+        let capacity = AVAudioFrameCount(Double(inputBuffer.frameLength) * ratio + 1024)
+        guard let outBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
+
+        var consumed = false
+        var error: NSError?
+        let status = converter.convert(to: outBuffer, error: &error) { _, inputStatus in
+            if consumed {
+                inputStatus.pointee = .noDataNow
+                return nil
+            }
+            consumed = true
+            inputStatus.pointee = .haveData
+            return inputBuffer
+        }
+
+        if status == .error || error != nil { return }
+        if outBuffer.frameLength == 0 { return }
+        processBuffer(outBuffer)
     }
 
     private func processBuffer(_ buffer: AVAudioPCMBuffer) {

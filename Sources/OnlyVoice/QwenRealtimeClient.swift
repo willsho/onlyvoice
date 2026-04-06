@@ -2,7 +2,7 @@ import Foundation
 
 /// WebSocket client for Qwen-Omni-Realtime API (DashScope).
 /// Uses Manual mode: send audio frames, commit on stop, receive transcription.
-final class QwenRealtimeClient {
+final class QwenRealtimeClient: NSObject, URLSessionWebSocketDelegate {
     private var webSocket: URLSessionWebSocketTask?
     private var urlSession: URLSession?
     private var isConnected = false
@@ -13,7 +13,7 @@ final class QwenRealtimeClient {
     var onError: ((String) -> Void)?
 
     private var apiKey: String { UserDefaults.standard.string(forKey: "dashscope_api_key") ?? "" }
-    private var model: String { UserDefaults.standard.string(forKey: "dashscope_model") ?? "qwen-omni-turbo-latest" }
+    private var model: String { UserDefaults.standard.string(forKey: "dashscope_model") ?? "qwen3.5-omni-plus-realtime" }
 
     private var language: String {
         UserDefaults.standard.string(forKey: "selected_language") ?? "zh-CN"
@@ -34,15 +34,38 @@ final class QwenRealtimeClient {
         var request = URLRequest(url: url)
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
 
-        let session = URLSession(configuration: .default)
+        let session = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
         self.urlSession = session
         let ws = session.webSocketTask(with: request)
         self.webSocket = ws
+        print("[QwenRT] Connecting to \(urlString)")
         ws.resume()
+        // Defer isConnected/receive/send until didOpenWithProtocol fires.
+    }
 
+    // MARK: - URLSessionWebSocketDelegate
+
+    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
+        print("[QwenRT] WebSocket opened")
         isConnected = true
         receiveMessages()
         sendSessionUpdate()
+    }
+
+    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        let reasonStr = reason.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        print("[QwenRT] WebSocket closed code=\(closeCode.rawValue) reason=\(reasonStr)")
+        isConnected = false
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error = error {
+            print("[QwenRT] Task error: \(error.localizedDescription)")
+            if let resp = task.response as? HTTPURLResponse {
+                print("[QwenRT] HTTP status: \(resp.statusCode) headers=\(resp.allHeaderFields)")
+            }
+            DispatchQueue.main.async { self.onError?(error.localizedDescription) }
+        }
     }
 
     func disconnect() {
@@ -111,12 +134,8 @@ final class QwenRealtimeClient {
             "session": [
                 "modalities": ["text"],
                 "instructions": instructions,
-                "input_audio_format": "pcm16",
-                "input_audio_transcription": [
-                    "model": "whisper-1",
-                    "language": language
-                ],
-                "turn_detection": NSNull() // Manual mode
+                "input_audio_format": "pcm",
+                "turn_detection": NSNull()  // manual mode; client commits on Fn release
             ]
         ]
         sendJSON(sessionConfig)
