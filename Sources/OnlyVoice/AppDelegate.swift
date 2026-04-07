@@ -27,8 +27,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Register defaults
         UserDefaults.standard.register(defaults: [
             "selected_language": "zh-CN",
-            "dashscope_model": "qwen3.5-omni-plus-realtime"
+            "dashscope_model": DashScopeRealtimeDefaults.model
         ])
+        migrateDefaultModelIfNeeded()
 
         setupMainMenu()
         setupStatusBar()
@@ -38,6 +39,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: - Status Bar
+
+    private func migrateDefaultModelIfNeeded() {
+        let defaults = UserDefaults.standard
+        let previousDefaults = [
+            "qwen3.5-omni-plus-realtime",
+            "qwen3-omni-flash-realtime"
+        ]
+        if let model = defaults.string(forKey: "dashscope_model"), previousDefaults.contains(model) {
+            defaults.set(DashScopeRealtimeDefaults.model, forKey: "dashscope_model")
+        }
+    }
 
     private func setupMainMenu() {
         let mainMenu = NSMenu()

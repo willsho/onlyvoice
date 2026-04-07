@@ -3,7 +3,7 @@ import Cocoa
 /// Settings window for configuring DashScope API Key and Model.
 final class SettingsWindowController: NSWindowController {
     private var apiKeyField: NSSecureTextField!
-    private var modelField: NSTextField!
+    private var modelField: NSComboBox!
     private var statusLabel: NSTextField!
     private var testButton: NSButton!
     private var saveButton: NSButton!
@@ -52,9 +52,13 @@ final class SettingsWindowController: NSWindowController {
         contentView.addSubview(modelLabel)
 
         // Model field
-        modelField = NSTextField(frame: NSRect(x: padding + labelWidth + 8, y: 120, width: 350, height: fieldHeight))
-        modelField.placeholderString = "qwen-omni-turbo-latest"
+        modelField = NSComboBox(frame: NSRect(x: padding + labelWidth + 8, y: 120, width: 350, height: fieldHeight))
+        modelField.placeholderString = DashScopeRealtimeDefaults.model
         modelField.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        modelField.isEditable = true
+        modelField.completes = true
+        modelField.numberOfVisibleItems = DashScopeRealtimeDefaults.models.count
+        modelField.addItems(withObjectValues: DashScopeRealtimeDefaults.models)
         contentView.addSubview(modelField)
 
         // Status label
@@ -83,7 +87,9 @@ final class SettingsWindowController: NSWindowController {
     private func loadSettings() {
         let defaults = UserDefaults.standard
         apiKeyField.stringValue = defaults.string(forKey: "dashscope_api_key") ?? ""
-        modelField.stringValue = defaults.string(forKey: "dashscope_model") ?? "qwen-omni-turbo-latest"
+        let model = defaults.string(forKey: "dashscope_model") ?? DashScopeRealtimeDefaults.model
+        addModelToDropdownIfNeeded(model)
+        modelField.stringValue = model
     }
 
     @objc private func saveSettings() {
@@ -92,7 +98,7 @@ final class SettingsWindowController: NSWindowController {
         defaults.set(apiKey, forKey: "dashscope_api_key")
 
         let model = modelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        defaults.set(model.isEmpty ? "qwen-omni-turbo-latest" : model, forKey: "dashscope_model")
+        defaults.set(model.isEmpty ? DashScopeRealtimeDefaults.model : model, forKey: "dashscope_model")
 
         statusLabel.textColor = .systemGreen
         statusLabel.stringValue = "Settings saved."
@@ -115,15 +121,16 @@ final class SettingsWindowController: NSWindowController {
         testButton.isEnabled = false
 
         let model = modelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let modelName = model.isEmpty ? "qwen-omni-turbo-latest" : model
+        let modelName = model.isEmpty ? DashScopeRealtimeDefaults.model : model
 
-        // Test via WebSocket handshake
-        let urlString = "wss://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+        // Test via Realtime WebSocket handshake.
+        let encodedModel = modelName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? modelName
+        let urlString = "\(DashScopeRealtimeDefaults.endpoint)?model=\(encodedModel)"
         guard let url = URL(string: urlString) else { return }
 
         var request = URLRequest(url: url)
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue(modelName, forHTTPHeaderField: "X-DashScope-Model")
+        request.timeoutInterval = 10
 
         let session = URLSession(configuration: .default)
         let ws = session.webSocketTask(with: request)
@@ -162,6 +169,11 @@ final class SettingsWindowController: NSWindowController {
                 session.invalidateAndCancel()
             }
         }
+    }
+
+    private func addModelToDropdownIfNeeded(_ model: String) {
+        guard !model.isEmpty, modelField.indexOfItem(withObjectValue: model) == NSNotFound else { return }
+        modelField.addItem(withObjectValue: model)
     }
 
     func showWindow() {

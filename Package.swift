@@ -4,9 +4,13 @@ import PackageDescription
 let package = Package(
     name: "OnlyVoice",
     platforms: [.macOS(.v14)],
+    dependencies: [
+        .package(url: "https://github.com/daltoniam/Starscream.git", from: "4.0.8"),
+    ],
     targets: [
         .executableTarget(
             name: "OnlyVoice",
+            dependencies: ["Starscream"],
             path: "Sources/OnlyVoice",
             linkerSettings: [
                 .linkedFramework("Cocoa"),
