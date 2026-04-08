@@ -7,6 +7,9 @@ final class CapsulePanel {
     private var waveformView: WaveformView?
     private var textLabel: NSTextField?
     private var containerView: NSVisualEffectView?
+    private var shadowView: NSView?
+
+    private let shadowInset: CGFloat = 24
 
     private let capsuleHeight: CGFloat = 56
     private let cornerRadius: CGFloat = 28
@@ -24,7 +27,9 @@ final class CapsulePanel {
 
         // Create non-activating panel
         let initialWidth = horizontalPadding + waveformSize.width + elementSpacing + minTextWidth + horizontalPadding
-        let frame = NSRect(x: 0, y: 0, width: initialWidth, height: capsuleHeight)
+        let windowWidth = initialWidth + shadowInset * 2
+        let windowHeight = capsuleHeight + shadowInset * 2
+        let frame = NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight)
 
         let p = NSPanel(
             contentRect: frame,
@@ -34,7 +39,7 @@ final class CapsulePanel {
         )
         p.isOpaque = false
         p.backgroundColor = .clear
-        p.hasShadow = true
+        p.hasShadow = false
         p.level = .floating
         p.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
         p.titlebarAppearsTransparent = true
@@ -45,8 +50,26 @@ final class CapsulePanel {
         p.standardWindowButton(.miniaturizeButton)?.isHidden = true
         p.standardWindowButton(.zoomButton)?.isHidden = true
 
-        // Visual effect background
-        let effectView = NSVisualEffectView(frame: frame)
+        // Transparent root content view — hosts the shadow layer
+        let root = NSView(frame: frame)
+        root.wantsLayer = true
+        p.contentView = root
+
+        // Shadow host: draws a capsule-shaped drop shadow matching the visual effect view
+        let shadowHost = NSView()
+        shadowHost.wantsLayer = true
+        shadowHost.translatesAutoresizingMaskIntoConstraints = false
+        let shLayer = shadowHost.layer!
+        shLayer.shadowColor = NSColor.black.cgColor
+        shLayer.shadowOpacity = 0.28
+        shLayer.shadowRadius = 18
+        shLayer.shadowOffset = CGSize(width: 0, height: -6)
+        shLayer.masksToBounds = false
+        root.addSubview(shadowHost)
+        self.shadowView = shadowHost
+
+        // Visual effect background (clipped to capsule shape)
+        let effectView = NSVisualEffectView()
         effectView.material = .hudWindow
         effectView.state = .active
         effectView.blendingMode = .behindWindow
@@ -54,7 +77,7 @@ final class CapsulePanel {
         effectView.layer?.cornerRadius = cornerRadius
         effectView.layer?.masksToBounds = true
         effectView.translatesAutoresizingMaskIntoConstraints = false
-        p.contentView = effectView
+        shadowHost.addSubview(effectView)
         self.containerView = effectView
 
         // Waveform view
@@ -74,12 +97,19 @@ final class CapsulePanel {
         self.textLabel = label
 
         // Constraints
-        let wc = effectView.widthAnchor.constraint(equalToConstant: initialWidth)
+        let wc = shadowHost.widthAnchor.constraint(equalToConstant: initialWidth)
         self.widthConstraint = wc
 
         NSLayoutConstraint.activate([
-            effectView.heightAnchor.constraint(equalToConstant: capsuleHeight),
+            shadowHost.centerXAnchor.constraint(equalTo: root.centerXAnchor),
+            shadowHost.centerYAnchor.constraint(equalTo: root.centerYAnchor),
+            shadowHost.heightAnchor.constraint(equalToConstant: capsuleHeight),
             wc,
+
+            effectView.leadingAnchor.constraint(equalTo: shadowHost.leadingAnchor),
+            effectView.trailingAnchor.constraint(equalTo: shadowHost.trailingAnchor),
+            effectView.topAnchor.constraint(equalTo: shadowHost.topAnchor),
+            effectView.bottomAnchor.constraint(equalTo: shadowHost.bottomAnchor),
 
             waveform.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: horizontalPadding),
             waveform.centerYAnchor.constraint(equalTo: effectView.centerYAnchor),
@@ -95,6 +125,10 @@ final class CapsulePanel {
         positionPanel(p, width: initialWidth)
 
         self.panel = p
+
+        // Initial shadow path
+        p.layoutIfNeeded()
+        updateShadowPath()
 
         // Entrance animation: spring scale
         p.alphaValue = 0
@@ -144,6 +178,7 @@ final class CapsulePanel {
             self?.waveformView = nil
             self?.textLabel = nil
             self?.containerView = nil
+            self?.shadowView = nil
             self?.panel = nil
             self?.currentText = ""
             self?.widthConstraint = nil
@@ -174,7 +209,20 @@ final class CapsulePanel {
             if let p = self.panel {
                 self.positionPanel(p, width: totalWidth)
             }
+        }, completionHandler: { [weak self] in
+            self?.updateShadowPath()
         })
+    }
+
+    private func updateShadowPath() {
+        guard let sv = shadowView else { return }
+        let b = sv.bounds
+        sv.layer?.shadowPath = CGPath(
+            roundedRect: b,
+            cornerWidth: cornerRadius,
+            cornerHeight: cornerRadius,
+            transform: nil
+        )
     }
 
     // MARK: - Private
@@ -182,8 +230,10 @@ final class CapsulePanel {
     private func positionPanel(_ panel: NSPanel, width: CGFloat) {
         guard let screen = NSScreen.main else { return }
         let screenFrame = screen.visibleFrame
-        let x = screenFrame.midX - width / 2
-        let y = screenFrame.origin.y + 60  // 60px from bottom
-        panel.setFrame(NSRect(x: x, y: y, width: width, height: capsuleHeight), display: true)
+        let windowWidth = width + shadowInset * 2
+        let windowHeight = capsuleHeight + shadowInset * 2
+        let x = screenFrame.midX - windowWidth / 2
+        let y = screenFrame.origin.y + 60 - shadowInset  // 60px from bottom (capsule baseline)
+        panel.setFrame(NSRect(x: x, y: y, width: windowWidth, height: windowHeight), display: true)
     }
 }

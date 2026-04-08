@@ -1,5 +1,6 @@
 import Cocoa
 import Carbon
+import ApplicationServices
 
 /// Monitors Fn key press/release globally via CGEvent tap.
 /// Suppresses the Fn event to prevent triggering the emoji picker.
@@ -11,7 +12,22 @@ final class FnKeyMonitor {
     private var runLoopSource: CFRunLoopSource?
     private var fnIsDown = false
 
+    /// Prompts the user to grant Accessibility permission if not already granted.
+    /// Returns true if the process is trusted.
+    @discardableResult
+    func ensureAccessibilityPermission(prompt: Bool = true) -> Bool {
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        let options: NSDictionary = [key: prompt]
+        return AXIsProcessTrustedWithOptions(options)
+    }
+
     func start() {
+        // Request Accessibility permission on first launch (needed for event tap + text injection).
+        if !ensureAccessibilityPermission(prompt: true) {
+            print("[FnKeyMonitor] Accessibility permission not granted yet. System prompt shown; user must enable OnlyVoice in System Settings → Privacy & Security → Accessibility, then relaunch.")
+            return
+        }
+
         let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue)
 
         // We need to pass self to the C callback, so use Unmanaged
