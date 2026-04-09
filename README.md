@@ -1,58 +1,58 @@
 # OnlyVoice
 
-一个极简的 macOS 语音输入工具。按 `Fn` 说话，识别结果直接写入当前光标位置。支持长按和轻点两种触发方式。
+A minimal voice input utility for macOS. Press `Fn` to talk, and the transcription is written directly at the current cursor. Supports both press-and-hold and tap-to-toggle triggers.
 
-由阿里云 **Qwen-Omni Realtime** 提供语音转文字能力。
+Speech-to-text is powered by Alibaba Cloud's **Qwen-Omni Realtime**.
 
-## 特性
+## Features
 
-- **双模式触发**：长按 `Fn` 说话松开结束（对讲机式）；或轻点一下 `Fn` 开始录音，再轻点一下结束（免按式）
-- **屏蔽系统副作用**：在 HID 层拦截 `Fn` 事件，避免同时触发 macOS 的 "按 🌐 切换输入法 / 表情面板"
-- **菜单栏常驻**：无 Dock 图标，只在菜单栏显示波形图标
-- **胶囊式悬浮面板**：录音时屏幕上显示实时波形与转写预览
-- **直接注入**：识别完成后自动粘贴到当前焦点的输入框，无需手动复制
-- **多语言识别**：简体中文、繁体中文、English、日本語、한국어
-- **可配置模型**：默认 `qwen3-omni-flash-realtime`，可在设置中下拉切换
+- **Dual trigger modes**: hold `Fn` to talk and release to stop (walkie-talkie style), or tap `Fn` once to start and again to stop (hands-free)
+- **Suppresses system side-effects**: intercepts `Fn` at the HID layer to avoid macOS's built-in "press 🌐 to switch input source / open emoji picker"
+- **Menu bar resident**: no Dock icon, only a waveform icon in the menu bar
+- **Capsule floating panel**: shows live waveform and transcription preview while recording
+- **Direct injection**: automatically pastes the result into the focused text field — no manual copy
+- **Multilingual recognition**: Simplified Chinese, Traditional Chinese, English, Japanese, Korean
+- **Configurable model**: defaults to `qwen3-omni-flash-realtime`, switchable in Settings
 
-## 系统要求
+## Requirements
 
-- macOS 14 (Sonoma) 或更高版本
+- macOS 14 (Sonoma) or later
 - Swift 5.9+
-- 阿里云百炼（DashScope）API Key
+- Alibaba Cloud Bailian (DashScope) API Key
 
-## 构建
+## Build
 
 ```bash
-make build      # 构建并打包 OnlyVoice.app
-make run        # 构建并启动
-make install    # 构建并安装到 /Applications
-make clean      # 清理构建产物
+make build      # Build and package OnlyVoice.app
+make run        # Build and launch
+make install    # Build and install to /Applications
+make clean      # Clean build artifacts
 ```
 
-## 使用
+## Usage
 
-1. 首次启动时授予**麦克风**权限
-2. 在 **系统设置 → 隐私与安全性 → 辅助功能** 中勾选 OnlyVoice（用于监听 Fn 键和注入文本）
-3. 点击菜单栏波形图标 → **Qwen-Omni Settings...**，填入 DashScope API Key
-4. 在任意输入框中使用：
-   - **长按模式**：按住 `Fn` 说话，松开即转写并写入
-   - **轻点模式**：快速按一下 `Fn`（< 0.4s）开始录音，再按一下结束
+1. Grant **Microphone** permission on first launch
+2. Enable OnlyVoice in **System Settings → Privacy & Security → Accessibility** (required to listen to the Fn key and inject text)
+3. Click the waveform icon in the menu bar → **Qwen-Omni Settings...** and enter your DashScope API Key
+4. In any text field:
+   - **Hold mode**: press and hold `Fn` to talk, release to transcribe and insert
+   - **Tap mode**: quickly tap `Fn` (< 0.4s) to start recording, tap again to stop
 
-## 项目结构
+## Project Structure
 
 ```
 Sources/OnlyVoice/
-├── main.swift               # 入口
-├── AppDelegate.swift        # 菜单栏、状态管理、录音生命周期
-├── AudioEngine.swift        # 麦克风采集与 PCM 编码
-├── QwenRealtimeClient.swift # Qwen-Omni Realtime WebSocket 客户端
-├── FnKeyMonitor.swift       # Fn 按键监听
-├── CapsulePanel.swift       # 胶囊悬浮面板 UI
-├── WaveformView.swift       # 实时波形可视化
-├── SettingsWindow.swift     # API Key / 模型设置窗口
-└── TextInjector.swift       # 向当前焦点输入框注入文本
+├── main.swift               # Entry point
+├── AppDelegate.swift        # Menu bar, state, recording lifecycle
+├── AudioEngine.swift        # Microphone capture and PCM encoding
+├── QwenRealtimeClient.swift # Qwen-Omni Realtime WebSocket client
+├── FnKeyMonitor.swift       # Fn key monitoring
+├── CapsulePanel.swift       # Capsule floating panel UI
+├── WaveformView.swift       # Live waveform visualization
+├── SettingsWindow.swift     # API Key / model settings window
+└── TextInjector.swift       # Inject text into the focused field
 ```
 
-## 许可
+## License
 
-MIT
+Apache License 2.0. See [LICENSE](LICENSE).

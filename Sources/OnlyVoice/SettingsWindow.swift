@@ -3,6 +3,9 @@ import Cocoa
 /// Settings window for configuring DashScope API Key and Model.
 final class SettingsWindowController: NSWindowController {
     private var apiKeyField: NSSecureTextField!
+    private var apiKeyPlainField: NSTextField!
+    private var revealButton: NSButton!
+    private var apiKeyRevealed = false
     private var modelField: NSComboBox!
     private var statusLabel: NSTextField!
     private var testButton: NSButton!
@@ -33,20 +36,38 @@ final class SettingsWindowController: NSWindowController {
 
         // API Key label
         let apiKeyLabel = NSTextField(labelWithString: "API Key:")
-        apiKeyLabel.frame = NSRect(x: padding, y: 160, width: labelWidth, height: fieldHeight)
+        apiKeyLabel.frame = NSRect(x: padding, y: 165, width: labelWidth, height: 18)
         apiKeyLabel.alignment = .right
         apiKeyLabel.font = NSFont.systemFont(ofSize: 13)
         contentView.addSubview(apiKeyLabel)
 
-        // API Key field (secure but allow clearing)
-        apiKeyField = NSSecureTextField(frame: NSRect(x: padding + labelWidth + 8, y: 160, width: 350, height: fieldHeight))
+        // API Key field (secure) and plain field overlay for reveal toggle
+        let fieldX = padding + labelWidth + 8
+        let fieldWidth: CGFloat = 318
+        apiKeyField = NSSecureTextField(frame: NSRect(x: fieldX, y: 160, width: fieldWidth, height: fieldHeight))
         apiKeyField.placeholderString = "Enter your DashScope API Key"
         apiKeyField.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         contentView.addSubview(apiKeyField)
 
+        apiKeyPlainField = NSTextField(frame: NSRect(x: fieldX, y: 160, width: fieldWidth, height: fieldHeight))
+        apiKeyPlainField.placeholderString = "Enter your DashScope API Key"
+        apiKeyPlainField.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        apiKeyPlainField.isHidden = true
+        contentView.addSubview(apiKeyPlainField)
+
+        // Reveal (eye) toggle button
+        revealButton = NSButton(frame: NSRect(x: fieldX + fieldWidth + 4, y: 160, width: 28, height: fieldHeight))
+        revealButton.bezelStyle = .regularSquare
+        revealButton.isBordered = false
+        revealButton.image = NSImage(systemSymbolName: "eye", accessibilityDescription: "Show API Key")
+        revealButton.target = self
+        revealButton.action = #selector(toggleRevealAPIKey)
+        revealButton.toolTip = "Show/Hide API Key"
+        contentView.addSubview(revealButton)
+
         // Model label
         let modelLabel = NSTextField(labelWithString: "Model:")
-        modelLabel.frame = NSRect(x: padding, y: 120, width: labelWidth, height: fieldHeight)
+        modelLabel.frame = NSRect(x: padding, y: 125, width: labelWidth, height: 18)
         modelLabel.alignment = .right
         modelLabel.font = NSFont.systemFont(ofSize: 13)
         contentView.addSubview(modelLabel)
@@ -84,9 +105,31 @@ final class SettingsWindowController: NSWindowController {
         contentView.addSubview(saveButton)
     }
 
+    @objc private func toggleRevealAPIKey() {
+        apiKeyRevealed.toggle()
+        if apiKeyRevealed {
+            apiKeyPlainField.stringValue = apiKeyField.stringValue
+            apiKeyField.isHidden = true
+            apiKeyPlainField.isHidden = false
+            revealButton.image = NSImage(systemSymbolName: "eye.slash", accessibilityDescription: "Hide API Key")
+        } else {
+            apiKeyField.stringValue = apiKeyPlainField.stringValue
+            apiKeyPlainField.isHidden = true
+            apiKeyField.isHidden = false
+            revealButton.image = NSImage(systemSymbolName: "eye", accessibilityDescription: "Show API Key")
+        }
+    }
+
+    private func currentAPIKey() -> String {
+        (apiKeyRevealed ? apiKeyPlainField.stringValue : apiKeyField.stringValue)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private func loadSettings() {
         let defaults = UserDefaults.standard
-        apiKeyField.stringValue = defaults.string(forKey: "dashscope_api_key") ?? ""
+        let key = defaults.string(forKey: "dashscope_api_key") ?? ""
+        apiKeyField.stringValue = key
+        apiKeyPlainField.stringValue = key
         let model = defaults.string(forKey: "dashscope_model") ?? DashScopeRealtimeDefaults.model
         addModelToDropdownIfNeeded(model)
         modelField.stringValue = model
@@ -94,7 +137,7 @@ final class SettingsWindowController: NSWindowController {
 
     @objc private func saveSettings() {
         let defaults = UserDefaults.standard
-        let apiKey = apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let apiKey = currentAPIKey()
         defaults.set(apiKey, forKey: "dashscope_api_key")
 
         let model = modelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -109,7 +152,7 @@ final class SettingsWindowController: NSWindowController {
     }
 
     @objc private func testConnection() {
-        let apiKey = apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let apiKey = currentAPIKey()
         guard !apiKey.isEmpty else {
             statusLabel.textColor = .systemRed
             statusLabel.stringValue = "API Key is empty."

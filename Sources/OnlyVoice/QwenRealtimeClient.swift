@@ -5,11 +5,8 @@ enum DashScopeRealtimeDefaults {
     static let endpoint = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
     static let model = "qwen3-omni-flash-realtime"
     static let models = [
-        "qwen3.5-omni-flash-realtime",
-        "qwen3.5-omni-plus-realtime",
         "qwen3-omni-flash-realtime",
-        "qwen3-omni-flash-realtime-2025-12-01",
-        "qwen-omni-turbo-realtime"
+        "qwen3.5-omni-flash-realtime"
     ]
 }
 

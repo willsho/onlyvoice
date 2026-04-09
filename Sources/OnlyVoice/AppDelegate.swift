@@ -100,8 +100,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let menu = NSMenu()
 
-        // Language submenu
-        let langItem = NSMenuItem(title: "Language", action: nil, keyEquivalent: "")
+        // Spoken language submenu (the language the user speaks, not the system UI language)
+        let langItem = NSMenuItem(title: "Spoken Language", action: nil, keyEquivalent: "")
         let langMenu = NSMenu()
         let currentLang = UserDefaults.standard.string(forKey: "selected_language") ?? "zh-CN"
 
