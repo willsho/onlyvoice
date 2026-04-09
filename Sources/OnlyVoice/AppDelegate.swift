@@ -14,6 +14,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pendingTranscript = ""
     private var waitingForResponse = false
 
+    // Recording mode: hold-to-talk vs tap-to-toggle.
+    // - Press Fn → startRecording, enter .holding
+    // - Release Fn quickly (< tapThreshold) → stay recording in .toggled
+    // - Release Fn after long hold → stopRecording
+    // - Next Fn press while .toggled → stopRecording
+    private enum RecordMode { case idle, holding, toggled }
+    private var recordMode: RecordMode = .idle
+    private var fnDownAt: CFTimeInterval = 0
+    private let tapThreshold: CFTimeInterval = 0.4
+
     private let startSound: NSSound? = {
         guard let url = Bundle.module.url(forResource: "record-start", withExtension: "wav") else { return nil }
         return NSSound(contentsOf: url, byReference: true)
@@ -163,10 +173,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupFnMonitor() {
         fnMonitor.onFnDown = { [weak self] in
-            self?.startRecording()
+            self?.handleFnDown()
         }
         fnMonitor.onFnUp = { [weak self] in
-            self?.stopRecording()
+            self?.handleFnUp()
         }
         fnMonitor.start()
     }
@@ -210,6 +220,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Recording
 
+    private func handleFnDown() {
+        switch recordMode {
+        case .idle:
+            fnDownAt = CACurrentMediaTime()
+            recordMode = .holding
+            startRecording()
+        case .toggled:
+            // Second tap ends the toggled session.
+            recordMode = .idle
+            stopRecording()
+        case .holding:
+            break // shouldn't happen (Fn already down)
+        }
+    }
+
+    private func handleFnUp() {
+        switch recordMode {
+        case .holding:
+            let held = CACurrentMediaTime() - fnDownAt
+            if held < tapThreshold {
+                // Treat as tap: keep recording until next Fn press.
+                recordMode = .toggled
+            } else {
+                recordMode = .idle
+                stopRecording()
+            }
+        case .toggled, .idle:
+            break
+        }
+    }
+
     private func startRecording() {
         guard !isRecording else { return }
         isRecording = true
@@ -245,6 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func stopRecording() {
         guard isRecording else { return }
         isRecording = false
+        recordMode = .idle
 
         audioEngine.stop()
         endSound?.stop()

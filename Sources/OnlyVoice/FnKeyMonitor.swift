@@ -33,8 +33,11 @@ final class FnKeyMonitor {
         // We need to pass self to the C callback, so use Unmanaged
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
 
+        // Use HID-level tap (earliest point in the event pipeline) so we can
+        // suppress the Fn key before macOS's "Press 🌐 to change input source"
+        // handler consumes it. Session tap is too late for this.
         guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
+            tap: .cghidEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,  // Active tap so we can suppress events
             eventsOfInterest: eventMask,
