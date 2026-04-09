@@ -1,9 +1,11 @@
 import Cocoa
 import Carbon
 import ApplicationServices
+import IOKit.hid
+import IOKit.hidsystem
 
-/// Monitors Fn key press/release globally via CGEvent tap.
-/// Suppresses the Fn event to prevent triggering the emoji picker.
+/// Monitors Fn/Globe press/release globally.
+/// Prefers remapping Fn/Globe to an inert surrogate key so macOS doesn't switch input sources.
 final class FnKeyMonitor {
     var onFnDown: (() -> Void)?
     var onFnUp: (() -> Void)?
@@ -11,6 +13,12 @@ final class FnKeyMonitor {
     fileprivate var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var fnIsDown = false
+    private var eventSystemClient: IOHIDEventSystemClient?
+    private var originalGlobalMapping: Any?
+
+    private let remappedKeyCode = CGKeyCode(kVK_F18)
+    private let fnUsageValue: UInt64 = 0x000000FF00000003
+    private let remappedUsageValue: UInt64 = 0x00070000006D
 
     /// Prompts the user to grant Accessibility permission if not already granted.
     /// Returns true if the process is trusted.
@@ -28,16 +36,19 @@ final class FnKeyMonitor {
             return
         }
 
-        let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue)
+        let remapInstalled = installFnRemapping()
+        let eventMask: CGEventMask =
+            (1 << CGEventType.keyDown.rawValue) |
+            (1 << CGEventType.keyUp.rawValue) |
+            (1 << CGEventType.flagsChanged.rawValue)
 
         // We need to pass self to the C callback, so use Unmanaged
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
 
-        // Use HID-level tap (earliest point in the event pipeline) so we can
-        // suppress the Fn key before macOS's "Press 🌐 to change input source"
-        // handler consumes it. Session tap is too late for this.
+        // Once Fn/Globe is remapped to F18, a regular session-level tap is sufficient.
+        // Keep flagsChanged in the mask as a fallback path when remapping isn't available.
         guard let tap = CGEvent.tapCreate(
-            tap: .cghidEventTap,
+            tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,  // Active tap so we can suppress events
             eventsOfInterest: eventMask,
@@ -46,6 +57,10 @@ final class FnKeyMonitor {
         ) else {
             print("[FnKeyMonitor] Failed to create event tap. Check Accessibility permissions.")
             return
+        }
+
+        if !remapInstalled {
+            print("[FnKeyMonitor] Fn remapping unavailable; falling back to flagsChanged monitoring.")
         }
 
         self.eventTap = tap
@@ -65,9 +80,18 @@ final class FnKeyMonitor {
         eventTap = nil
         runLoopSource = nil
         fnIsDown = false
+        restoreFnRemapping()
     }
 
-    fileprivate func handleFlagsChanged(_ event: CGEvent) -> Bool {
+    fileprivate func handleEvent(type: CGEventType, event: CGEvent) -> Bool {
+        if eventSystemClient != nil, handleRemappedKeyEvent(type: type, event: event) {
+            return true
+        }
+
+        guard type == .flagsChanged else {
+            return false
+        }
+
         let flags = event.flags
         let isFnPressed = flags.contains(.maskSecondaryFn)
 
@@ -86,6 +110,72 @@ final class FnKeyMonitor {
         }
 
         return false  // don't suppress non-Fn flag changes
+    }
+
+    private func handleRemappedKeyEvent(type: CGEventType, event: CGEvent) -> Bool {
+        guard type == .keyDown || type == .keyUp else {
+            return false
+        }
+
+        let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+        guard keyCode == remappedKeyCode else {
+            return false
+        }
+
+        if type == .keyDown {
+            let isAutoRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+            guard !isAutoRepeat, !fnIsDown else { return true }
+            fnIsDown = true
+            DispatchQueue.main.async { [weak self] in
+                self?.onFnDown?()
+            }
+            return true
+        }
+
+        guard fnIsDown else { return true }
+        fnIsDown = false
+        DispatchQueue.main.async { [weak self] in
+            self?.onFnUp?()
+        }
+        return true
+    }
+
+    private func installFnRemapping() -> Bool {
+        restoreFnRemapping()
+
+        let system = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault)
+        self.eventSystemClient = system
+
+        let originalMapping = IOHIDEventSystemClientCopyProperty(system, kIOHIDUserKeyUsageMapKey as CFString)
+        let existingMappings = (originalMapping as? [[String: NSNumber]]) ?? []
+        var updatedMappings = existingMappings.filter {
+            $0[kIOHIDKeyboardModifierMappingSrcKey]?.uint64Value != fnUsageValue
+        }
+        updatedMappings.append([
+            kIOHIDKeyboardModifierMappingSrcKey: NSNumber(value: fnUsageValue),
+            kIOHIDKeyboardModifierMappingDstKey: NSNumber(value: remappedUsageValue)
+        ])
+
+        guard IOHIDEventSystemClientSetProperty(system, kIOHIDUserKeyUsageMapKey as CFString, updatedMappings as CFArray) else {
+            self.eventSystemClient = nil
+            return false
+        }
+
+        self.originalGlobalMapping = originalMapping
+        return true
+    }
+
+    private func restoreFnRemapping() {
+        guard let system = eventSystemClient else { return }
+
+        if let originalGlobalMapping {
+            _ = IOHIDEventSystemClientSetProperty(system, kIOHIDUserKeyUsageMapKey as CFString, originalGlobalMapping as CFTypeRef)
+        } else {
+            _ = IOHIDEventSystemClientSetProperty(system, kIOHIDUserKeyUsageMapKey as CFString, [] as CFArray)
+        }
+
+        originalGlobalMapping = nil
+        eventSystemClient = nil
     }
 }
 
@@ -107,15 +197,15 @@ private func fnKeyCallback(
         return Unmanaged.passUnretained(event)
     }
 
-    guard type == .flagsChanged, let userInfo = userInfo else {
+    guard let userInfo = userInfo else {
         return Unmanaged.passUnretained(event)
     }
 
     let monitor = Unmanaged<FnKeyMonitor>.fromOpaque(userInfo).takeUnretainedValue()
-    let shouldSuppress = monitor.handleFlagsChanged(event)
+    let shouldSuppress = monitor.handleEvent(type: type, event: event)
 
     if shouldSuppress {
-        return nil  // Suppress the event — prevents emoji picker
+        return nil  // Suppress the surrogate event (or legacy Fn flagsChanged fallback)
     }
     return Unmanaged.passUnretained(event)
 }
