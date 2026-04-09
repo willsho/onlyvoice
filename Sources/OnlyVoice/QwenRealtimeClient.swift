@@ -154,7 +154,7 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
         4. If the input sounds correct, return it EXACTLY as heard.
         5. Preserve the original language mix (Chinese-English code-switching is normal).
         6. NEVER add punctuation that wasn't implied by speech pauses.
-        7. If you hear nothing or only noise, return an empty string.
+        7. If you hear nothing or only noise, return an empty string. Do NOT output placeholder words like "空"/"empty"/"(无)"/"silence" — return literally nothing.
         """
 
         let sessionConfig: [String: Any] = [
@@ -202,8 +202,9 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
             // Streaming text delta
             if let delta = json["delta"] as? String {
                 pendingTranscript += delta
+                let display = Self.isEmptyPlaceholder(self.pendingTranscript) ? "" : self.pendingTranscript
                 DispatchQueue.main.async {
-                    self.onTranscript?(self.pendingTranscript)
+                    self.onTranscript?(display)
                 }
             }
 
@@ -215,7 +216,8 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
 
         case "response.done":
             // Full response complete — extract final text
-            let finalText = extractFinalText(from: json) ?? pendingTranscript
+            let rawFinal = extractFinalText(from: json) ?? pendingTranscript
+            let finalText = Self.isEmptyPlaceholder(rawFinal) ? "" : rawFinal
             DispatchQueue.main.async {
                 self.onFinalTranscript?(finalText)
             }
@@ -236,6 +238,17 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
             // session.updated, input_audio_buffer.committed, etc.
             break
         }
+    }
+
+    private static func isEmptyPlaceholder(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "。.,，!！?？()（）[]【】\"'“”‘’"))
+        if trimmed.isEmpty { return true }
+        let placeholders: Set<String> = [
+            "空", "无", "（空）", "(空)", "（无）", "(无)",
+            "empty", "silence", "none", "(empty)", "(silence)", "(none)"
+        ]
+        return placeholders.contains(trimmed.lowercased())
     }
 
     private func extractFinalText(from json: [String: Any]) -> String? {
