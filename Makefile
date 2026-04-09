@@ -5,8 +5,13 @@ INSTALL_DIR = /Applications
 ICON_SCRIPT = Tools/generate_app_icon.swift
 ICONSET_DIR = .build/AppIcon.iconset
 ICON_FILE = .build/AppIcon.icns
+VERSION := $(shell /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Info.plist)
+DIST_DIR = dist
+DMG_NAME = $(APP_NAME)-$(VERSION).dmg
+DMG_PATH = $(DIST_DIR)/$(DMG_NAME)
+DMG_STAGING_DIR = .build/dmg
 
-.PHONY: build run install clean icon
+.PHONY: build run install clean icon dmg
 
 icon:
 	@rm -rf $(ICONSET_DIR) $(ICON_FILE)
@@ -26,6 +31,18 @@ build: icon
 		--options runtime \
 		$(APP_BUNDLE)
 	@echo "Built $(APP_BUNDLE)"
+
+dmg: build
+	@rm -rf $(DMG_STAGING_DIR) $(DMG_PATH)
+	@mkdir -p $(DMG_STAGING_DIR) $(DIST_DIR)
+	@cp -R $(APP_BUNDLE) $(DMG_STAGING_DIR)/
+	@ln -s /Applications $(DMG_STAGING_DIR)/Applications
+	@hdiutil create -volname "$(APP_NAME)" \
+		-srcfolder $(DMG_STAGING_DIR) \
+		-ov -format UDZO \
+		$(DMG_PATH)
+	@rm -rf $(DMG_STAGING_DIR)
+	@echo "Built $(DMG_PATH)"
 
 run: build
 	@open $(APP_BUNDLE)
