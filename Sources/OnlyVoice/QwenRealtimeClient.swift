@@ -18,7 +18,12 @@ enum DashScopeRealtimeDefaults {
 final class QwenRealtimeClient: NSObject, WebSocketDelegate {
     private var socket: WebSocket?
     private var isConnected = false
+    private var sessionReady = false
     private var pendingTranscript = ""
+    /// 在 session 就绪之前缓冲的音频帧，避免连接/握手期间的语音被静默丢弃。
+    private var audioQueue: [String] = []
+    /// 若用户在 session 就绪前已经松手提交，先记住，等就绪后再 commit。
+    private var pendingCommit = false
 
     var onTranscript: ((String) -> Void)?
     var onFinalTranscript: ((String) -> Void)?
@@ -41,6 +46,9 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
     func connect() {
         disconnect()
         pendingTranscript = ""
+        sessionReady = false
+        audioQueue.removeAll()
+        pendingCommit = false
 
         guard !apiKey.isEmpty else {
             onError?("API Key not configured. Please set it in Settings.")
@@ -100,13 +108,39 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
 
     func disconnect() {
         isConnected = false
+        sessionReady = false
+        audioQueue.removeAll()
+        pendingCommit = false
         socket?.disconnect()
         socket = nil
     }
 
-    /// Send Base64-encoded PCM audio frame
+    /// Send Base64-encoded PCM audio frame.
+    /// session 就绪前先入队，避免连接/握手窗口期内的音频被丢弃。
     func sendAudioData(_ base64Audio: String) {
-        guard isConnected else { return }
+        if sessionReady {
+            sendAppendEvent(base64Audio)
+        } else {
+            audioQueue.append(base64Audio)
+            // 极端情况下避免无限增长（正常握手 1-2 秒，每秒约 10 帧 100ms 的 PCM）。
+            if audioQueue.count > 600 {  // ~60s 音频
+                audioQueue.removeFirst(audioQueue.count - 600)
+            }
+        }
+    }
+
+    /// Commit the audio buffer (on Fn key release).
+    /// 若 session 还没就绪（用户按得很快），延迟到就绪后再提交。
+    func commitAudioBuffer() {
+        if sessionReady {
+            sendCommitEvents()
+        } else {
+            pendingCommit = true
+            print("[QwenRT] commit deferred: session not ready yet, queued=\(audioQueue.count)")
+        }
+    }
+
+    private func sendAppendEvent(_ base64Audio: String) {
         let event: [String: Any] = [
             "type": "input_audio_buffer.append",
             "audio": base64Audio
@@ -114,18 +148,22 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
         sendJSON(event)
     }
 
-    /// Commit the audio buffer (on Fn key release)
-    func commitAudioBuffer() {
-        guard isConnected else { return }
-        let event: [String: Any] = [
-            "type": "input_audio_buffer.commit"
-        ]
-        sendJSON(event)
-        // Request a response after committing
-        let responseEvent: [String: Any] = [
-            "type": "response.create"
-        ]
-        sendJSON(responseEvent)
+    private func sendCommitEvents() {
+        sendJSON(["type": "input_audio_buffer.commit"])
+        sendJSON(["type": "response.create"])
+    }
+
+    private func flushQueued() {
+        if !audioQueue.isEmpty {
+            print("[QwenRT] flushing \(audioQueue.count) buffered audio frames")
+            for frame in audioQueue { sendAppendEvent(frame) }
+            audioQueue.removeAll()
+        }
+        if pendingCommit {
+            pendingCommit = false
+            print("[QwenRT] flushing deferred commit")
+            sendCommitEvents()
+        }
     }
 
     // MARK: - Private
@@ -234,8 +272,13 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
             print("[QwenRT] session.created received, sending session.update")
             sendSessionUpdate()
 
+        case "session.updated":
+            print("[QwenRT] session.updated — session ready, flushing queued audio")
+            sessionReady = true
+            flushQueued()
+
         default:
-            // session.updated, input_audio_buffer.committed, etc.
+            // input_audio_buffer.committed, response.created, etc.
             break
         }
     }

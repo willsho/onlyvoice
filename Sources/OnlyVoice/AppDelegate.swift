@@ -13,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isRecording = false
     private var pendingTranscript = ""
     private var waitingForResponse = false
+    /// 录音中已自动重连次数（避免无限循环）。
+    private var recordingReconnectCount = 0
 
     // Recording mode: hold-to-talk vs tap-to-toggle.
     // - Press Fn → startRecording, enter .holding
@@ -208,6 +210,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         qwenClient.onError = { [weak self] error in
             print("[OnlyVoice] Error: \(error)")
             guard let self = self else { return }
+
+            // 录音中出错：不要撕掉 UI 让用户白说话；尝试静默重连一次，后续音频会被
+            // QwenRealtimeClient 的队列缓冲，新 session 就绪后 flush。重连次数有限。
+            if self.isRecording && self.recordingReconnectCount < 2 {
+                self.recordingReconnectCount += 1
+                print("[OnlyVoice] mid-recording error, reconnecting (attempt \(self.recordingReconnectCount))")
+                self.qwenClient.connect()
+                return
+            }
+
             self.waitingForResponse = false
             self.capsulePanel.updateTranscript("⚠ \(error)")
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
@@ -255,6 +267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !isRecording else { return }
         isRecording = true
         pendingTranscript = ""
+        recordingReconnectCount = 0
 
         startSound?.stop()
         startSound?.play()
