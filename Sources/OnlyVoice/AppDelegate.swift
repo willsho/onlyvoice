@@ -14,6 +14,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pendingTranscript = ""
     private var waitingForResponse = false
 
+    private let startSound: NSSound? = {
+        guard let url = Bundle.module.url(forResource: "record-start", withExtension: "wav") else { return nil }
+        return NSSound(contentsOf: url, byReference: true)
+    }()
+    private let endSound: NSSound? = {
+        guard let url = Bundle.module.url(forResource: "record-end", withExtension: "wav") else { return nil }
+        return NSSound(contentsOf: url, byReference: true)
+    }()
+
     // Language options
     private let languages: [(code: String, name: String)] = [
         ("zh-CN", "简体中文"),
@@ -206,6 +215,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         isRecording = true
         pendingTranscript = ""
 
+        startSound?.stop()
+        startSound?.play()
+
         updateStatusIcon(recording: true)
         capsulePanel.show()
 
@@ -235,6 +247,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         isRecording = false
 
         audioEngine.stop()
+        endSound?.stop()
+        endSound?.play()
         qwenClient.commitAudioBuffer()
         waitingForResponse = true
 

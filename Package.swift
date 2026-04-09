@@ -12,6 +12,7 @@ let package = Package(
             name: "OnlyVoice",
             dependencies: ["Starscream"],
             path: "Sources/OnlyVoice",
+            resources: [.process("Resources")],
             linkerSettings: [
                 .linkedFramework("Cocoa"),
                 .linkedFramework("AVFoundation"),
