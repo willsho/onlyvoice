@@ -14,3 +14,6 @@ DerivedData/
 # Build products
 OnlyVoice.app/
 *.dSYM/
+
+# Local reference docs
+Docs/Qwen-Omni-Realtime API DOC.md
