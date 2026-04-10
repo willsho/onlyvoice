@@ -15,6 +15,14 @@ final class FnKeyMonitor {
     private var fnIsDown = false
     private var eventSystemClient: IOHIDEventSystemClient?
     private var originalGlobalMapping: Any?
+    private var sigTermSource: DispatchSourceSignal?
+
+    /// Static state for atexit / signal cleanup — ensures Fn remapping is restored
+    /// even if the process exits without calling stop() (crash, exit(), SIGTERM).
+    /// SIGKILL (kill -9) cannot be caught; the next launch cleans up via installFnRemapping
+    /// which filters out stale Fn entries before re-adding its own.
+    private static var pendingCleanup: (system: IOHIDEventSystemClient, original: Any?)?
+    private static var atexitRegistered = false
 
     private let remappedKeyCode = CGKeyCode(kVK_F18)
     private let fnUsageValue: UInt64 = 0x000000FF00000003
@@ -68,6 +76,8 @@ final class FnKeyMonitor {
         self.runLoopSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
+
+        setupSigTermHandler()
     }
 
     func stop() {
@@ -80,6 +90,7 @@ final class FnKeyMonitor {
         eventTap = nil
         runLoopSource = nil
         fnIsDown = false
+        tearDownSigTermHandler()
         restoreFnRemapping()
     }
 
@@ -162,6 +173,13 @@ final class FnKeyMonitor {
         }
 
         self.originalGlobalMapping = originalMapping
+
+        // Register atexit handler so Fn mapping is restored even on abnormal exit.
+        Self.pendingCleanup = (system: system, original: originalMapping)
+        if !Self.atexitRegistered {
+            Self.atexitRegistered = true
+            atexit { FnKeyMonitor.atexitCleanup() }
+        }
         return true
     }
 
@@ -176,6 +194,38 @@ final class FnKeyMonitor {
 
         originalGlobalMapping = nil
         eventSystemClient = nil
+        Self.pendingCleanup = nil
+    }
+
+    // MARK: - Process termination safety
+
+    /// Catch SIGTERM (Force Quit / kill) so we can restore Fn before the process dies.
+    private func setupSigTermHandler() {
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler { [weak self] in
+            self?.stop()
+            exit(0)
+        }
+        source.resume()
+        sigTermSource = source
+    }
+
+    private func tearDownSigTermHandler() {
+        sigTermSource?.cancel()
+        sigTermSource = nil
+        signal(SIGTERM, SIG_DFL)
+    }
+
+    /// Called by atexit — last-resort restoration when stop() was never invoked.
+    private static func atexitCleanup() {
+        guard let info = pendingCleanup else { return }
+        if let original = info.original {
+            _ = IOHIDEventSystemClientSetProperty(info.system, kIOHIDUserKeyUsageMapKey as CFString, original as CFTypeRef)
+        } else {
+            _ = IOHIDEventSystemClientSetProperty(info.system, kIOHIDUserKeyUsageMapKey as CFString, [] as CFArray)
+        }
+        pendingCleanup = nil
     }
 }
 
