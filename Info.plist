@@ -18,6 +18,8 @@
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>OnlyVoice needs microphone access for voice-to-text input.</string>
+    <key>NSAccessibilityUsageDescription</key>
+    <string>OnlyVoice needs accessibility access to monitor the Fn key and inject transcribed text into input fields.</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
 </dict>

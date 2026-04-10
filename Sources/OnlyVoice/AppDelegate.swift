@@ -180,6 +180,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fnMonitor.onFnUp = { [weak self] in
             self?.handleFnUp()
         }
+        fnMonitor.onPermissionRequired = { [weak self] in
+            self?.updateStatusIcon(permissionNeeded: true)
+        }
+        fnMonitor.onPermissionGranted = { [weak self] in
+            self?.updateStatusIcon(permissionNeeded: false)
+        }
         fnMonitor.start()
     }
 
@@ -328,6 +334,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let symbolName = recording ? "waveform.circle.fill" : "waveform"
             button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "OnlyVoice")
             button.image?.size = NSSize(width: 18, height: 18)
+            button.toolTip = "OnlyVoice"
+        }
+    }
+
+    private func updateStatusIcon(permissionNeeded: Bool) {
+        guard let button = statusItem.button else { return }
+        if permissionNeeded {
+            button.image = NSImage(systemSymbolName: "waveform.badge.exclamationmark", accessibilityDescription: "OnlyVoice - Permission Required")
+            button.image?.size = NSSize(width: 18, height: 18)
+            button.toolTip = "OnlyVoice: Accessibility permission required — enable in System Settings → Privacy & Security → Accessibility"
+        } else {
+            button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "OnlyVoice")
+            button.image?.size = NSSize(width: 18, height: 18)
+            button.toolTip = "OnlyVoice"
         }
     }
 

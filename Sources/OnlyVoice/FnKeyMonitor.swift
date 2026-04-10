@@ -7,10 +7,15 @@ import ApplicationServices
 final class FnKeyMonitor {
     var onFnDown: (() -> Void)?
     var onFnUp: (() -> Void)?
+    /// Called when accessibility permission is required but not yet granted.
+    var onPermissionRequired: (() -> Void)?
+    /// Called when accessibility permission is granted and event tap is active.
+    var onPermissionGranted: (() -> Void)?
 
     fileprivate var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var fnIsDown = false
+    private var permissionPollTimer: Timer?
 
     /// Prompts the user to grant Accessibility permission if not already granted.
     /// Returns true if the process is trusted.
@@ -24,9 +29,12 @@ final class FnKeyMonitor {
     func start() {
         // Request Accessibility permission on first launch (needed for event tap + text injection).
         if !ensureAccessibilityPermission(prompt: true) {
-            print("[FnKeyMonitor] Accessibility permission not granted yet. System prompt shown; user must enable OnlyVoice in System Settings → Privacy & Security → Accessibility, then relaunch.")
+            print("[FnKeyMonitor] Accessibility permission not granted yet. Polling until granted...")
+            DispatchQueue.main.async { self.onPermissionRequired?() }
+            startPermissionPolling()
             return
         }
+        stopPermissionPolling()
 
         let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue)
 
@@ -56,6 +64,7 @@ final class FnKeyMonitor {
     }
 
     func stop() {
+        stopPermissionPolling()
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
             if let source = runLoopSource {
@@ -65,6 +74,27 @@ final class FnKeyMonitor {
         eventTap = nil
         runLoopSource = nil
         fnIsDown = false
+    }
+
+    // MARK: - Permission Polling
+
+    /// Polls for accessibility permission every 2 seconds. Once granted, auto-starts the event tap.
+    private func startPermissionPolling() {
+        guard permissionPollTimer == nil else { return }
+        permissionPollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            if AXIsProcessTrusted() {
+                print("[FnKeyMonitor] Accessibility permission granted, starting event tap.")
+                self.stopPermissionPolling()
+                self.start()
+                DispatchQueue.main.async { self.onPermissionGranted?() }
+            }
+        }
+    }
+
+    private func stopPermissionPolling() {
+        permissionPollTimer?.invalidate()
+        permissionPollTimer = nil
     }
 
     fileprivate func handleFlagsChanged(_ event: CGEvent) -> Bool {
