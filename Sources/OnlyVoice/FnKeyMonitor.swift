@@ -12,6 +12,10 @@ final class FnKeyMonitor {
     /// Called when accessibility permission is granted and event tap is active.
     var onPermissionGranted: (() -> Void)?
 
+    /// On macOS 16+, the Fn/Globe key sends keyDown/keyUp with this keycode
+    /// instead of flagsChanged events.
+    private static let fnGlobeKeyCode: Int64 = 79
+
     fileprivate var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var fnIsDown = false
@@ -37,6 +41,8 @@ final class FnKeyMonitor {
         stopPermissionPolling()
 
         let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue)
+            | (1 << CGEventType.keyDown.rawValue)
+            | (1 << CGEventType.keyUp.rawValue)
 
         // We need to pass self to the C callback, so use Unmanaged
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
@@ -97,25 +103,41 @@ final class FnKeyMonitor {
         permissionPollTimer = nil
     }
 
-    fileprivate func handleFlagsChanged(_ event: CGEvent) -> Bool {
+    /// Handle Fn via flagsChanged (legacy) or keyDown/keyUp (macOS 16+).
+    /// Returns true if the event should be suppressed.
+    fileprivate func handleEvent(_ event: CGEvent, type: CGEventType) -> Bool {
+        let keycode = event.getIntegerValueField(.keyboardEventKeycode)
         let flags = event.flags
-        let isFnPressed = flags.contains(.maskSecondaryFn)
 
-        if isFnPressed && !fnIsDown {
-            fnIsDown = true
-            DispatchQueue.main.async { [weak self] in
-                self?.onFnDown?()
+        // macOS 16+: Fn/Globe arrives as keyDown/keyUp with a specific keycode.
+        if keycode == Self.fnGlobeKeyCode && flags.contains(.maskSecondaryFn) {
+            if type == .keyDown && !fnIsDown {
+                fnIsDown = true
+                DispatchQueue.main.async { [weak self] in self?.onFnDown?() }
+                return true
+            } else if type == .keyUp && fnIsDown {
+                fnIsDown = false
+                DispatchQueue.main.async { [weak self] in self?.onFnUp?() }
+                return true
             }
-            return true  // suppress
-        } else if !isFnPressed && fnIsDown {
-            fnIsDown = false
-            DispatchQueue.main.async { [weak self] in
-                self?.onFnUp?()
-            }
-            return true  // suppress
+            return true // suppress other Fn globe events
         }
 
-        return false  // don't suppress non-Fn flag changes
+        // Legacy path: Fn via flagsChanged.
+        if type == .flagsChanged {
+            let isFnPressed = flags.contains(.maskSecondaryFn)
+            if isFnPressed && !fnIsDown {
+                fnIsDown = true
+                DispatchQueue.main.async { [weak self] in self?.onFnDown?() }
+                return true
+            } else if !isFnPressed && fnIsDown {
+                fnIsDown = false
+                DispatchQueue.main.async { [weak self] in self?.onFnUp?() }
+                return true
+            }
+        }
+
+        return false
     }
 }
 
@@ -137,12 +159,13 @@ private func fnKeyCallback(
         return Unmanaged.passUnretained(event)
     }
 
-    guard type == .flagsChanged, let userInfo = userInfo else {
+    guard (type == .flagsChanged || type == .keyDown || type == .keyUp),
+          let userInfo = userInfo else {
         return Unmanaged.passUnretained(event)
     }
 
     let monitor = Unmanaged<FnKeyMonitor>.fromOpaque(userInfo).takeUnretainedValue()
-    let shouldSuppress = monitor.handleFlagsChanged(event)
+    let shouldSuppress = monitor.handleEvent(event, type: type)
 
     if shouldSuppress {
         return nil  // Suppress the event — prevents emoji picker
