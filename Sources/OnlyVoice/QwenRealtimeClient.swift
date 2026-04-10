@@ -21,6 +21,8 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
     private var audioQueue: [String] = []
     /// 若用户在 session 就绪前已经松手提交，先记住，等就绪后再 commit。
     private var pendingCommit = false
+    /// 串行队列，保护上述所有可变状态的读写，避免音频线程 / WS 回调线程 / 主线程间的 data race。
+    private let stateQueue = DispatchQueue(label: "com.onlyvoice.qwen-realtime", qos: .userInitiated)
 
     var onTranscript: ((String) -> Void)?
     var onFinalTranscript: ((String) -> Void)?
@@ -41,69 +43,80 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
     }
 
     func connect() {
-        disconnect()
-        pendingTranscript = ""
-        sessionReady = false
-        audioQueue.removeAll()
-        pendingCommit = false
+        stateQueue.async { [self] in
+            _disconnect()
+            pendingTranscript = ""
+            sessionReady = false
+            audioQueue.removeAll()
+            pendingCommit = false
 
-        guard !apiKey.isEmpty else {
-            onError?("API Key not configured. Please set it in Settings.")
-            return
+            guard !apiKey.isEmpty else {
+                DispatchQueue.main.async { self.onError?("API Key not configured. Please set it in Settings.") }
+                return
+            }
+
+            let encodedModel = model.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? model
+            let urlString = "\(DashScopeRealtimeDefaults.endpoint)?model=\(encodedModel)"
+            guard let url = URL(string: urlString) else { return }
+
+            var request = URLRequest(url: url)
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            request.setValue("websocket-client/1.6.4", forHTTPHeaderField: "User-Agent")
+            request.timeoutInterval = 10
+
+            print("[QwenRT] Connecting to \(urlString) apiKeyConfigured=true")
+            print("[QwenRT] request headers = \(redactedHeaders(from: request))")
+
+            // compressionHandler: nil 关闭 permessage-deflate，避免服务端因未知扩展拒绝
+            let ws = WebSocket(request: request, certPinner: FoundationSecurity(), compressionHandler: nil)
+            ws.delegate = self
+            self.socket = ws
+            ws.connect()
         }
-
-        let encodedModel = model.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? model
-        let urlString = "\(DashScopeRealtimeDefaults.endpoint)?model=\(encodedModel)"
-        guard let url = URL(string: urlString) else { return }
-
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("websocket-client/1.6.4", forHTTPHeaderField: "User-Agent")
-        request.timeoutInterval = 10
-
-        print("[QwenRT] Connecting to \(urlString) apiKeyConfigured=true")
-        print("[QwenRT] request headers = \(redactedHeaders(from: request))")
-
-        // compressionHandler: nil 关闭 permessage-deflate，避免服务端因未知扩展拒绝
-        let ws = WebSocket(request: request, certPinner: FoundationSecurity(), compressionHandler: nil)
-        ws.delegate = self
-        self.socket = ws
-        ws.connect()
     }
 
     // MARK: - WebSocketDelegate (Starscream)
 
     func didReceive(event: WebSocketEvent, client: WebSocketClient) {
-        switch event {
-        case .connected(let headers):
-            print("[QwenRT] WebSocket opened, response headers=\(headers)")
-            isConnected = true
-            // 不立即发送 session.update；等服务端先发 session.created
-        case .disconnected(let reason, let code):
-            print("[QwenRT] WebSocket closed code=\(code) reason=\(reason)")
-            isConnected = false
-            if code != CloseCode.normal.rawValue {
-                DispatchQueue.main.async {
-                    self.onError?(self.userFacingCloseMessage(code: code, reason: reason))
+        stateQueue.async { [self] in
+            switch event {
+            case .connected(let headers):
+                print("[QwenRT] WebSocket opened, response headers=\(headers)")
+                isConnected = true
+                // 不立即发送 session.update；等服务端先发 session.created
+            case .disconnected(let reason, let code):
+                print("[QwenRT] WebSocket closed code=\(code) reason=\(reason)")
+                isConnected = false
+                if code != CloseCode.normal.rawValue {
+                    DispatchQueue.main.async {
+                        self.onError?(self.userFacingCloseMessage(code: code, reason: reason))
+                    }
                 }
+            case .text(let text):
+                handleMessage(text)
+            case .binary(let data):
+                if let text = String(data: data, encoding: .utf8) { handleMessage(text) }
+            case .error(let error):
+                let msg = error?.localizedDescription ?? "unknown"
+                print("[QwenRT] WebSocket error: \(msg)")
+                DispatchQueue.main.async { self.onError?("WebSocket error: \(msg)") }
+                isConnected = false
+            case .cancelled, .peerClosed:
+                isConnected = false
+            default:
+                break
             }
-        case .text(let text):
-            handleMessage(text)
-        case .binary(let data):
-            if let text = String(data: data, encoding: .utf8) { handleMessage(text) }
-        case .error(let error):
-            let msg = error?.localizedDescription ?? "unknown"
-            print("[QwenRT] WebSocket error: \(msg)")
-            DispatchQueue.main.async { self.onError?("WebSocket error: \(msg)") }
-            isConnected = false
-        case .cancelled, .peerClosed:
-            isConnected = false
-        default:
-            break
         }
     }
 
     func disconnect() {
+        stateQueue.async { [self] in
+            _disconnect()
+        }
+    }
+
+    /// 内部 disconnect，必须在 stateQueue 上调用。
+    private func _disconnect() {
         isConnected = false
         sessionReady = false
         audioQueue.removeAll()
@@ -115,13 +128,15 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
     /// Send Base64-encoded PCM audio frame.
     /// session 就绪前先入队，避免连接/握手窗口期内的音频被丢弃。
     func sendAudioData(_ base64Audio: String) {
-        if sessionReady {
-            sendAppendEvent(base64Audio)
-        } else {
-            audioQueue.append(base64Audio)
-            // 极端情况下避免无限增长（正常握手 1-2 秒，每秒约 10 帧 100ms 的 PCM）。
-            if audioQueue.count > 600 {  // ~60s 音频
-                audioQueue.removeFirst(audioQueue.count - 600)
+        stateQueue.async { [self] in
+            if sessionReady {
+                sendAppendEvent(base64Audio)
+            } else {
+                audioQueue.append(base64Audio)
+                // 极端情况下避免无限增长（正常握手 1-2 秒，每秒约 10 帧 100ms 的 PCM）。
+                if audioQueue.count > 600 {  // ~60s 音频
+                    audioQueue.removeFirst(audioQueue.count - 600)
+                }
             }
         }
     }
@@ -129,11 +144,13 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
     /// Commit the audio buffer (on Fn key release).
     /// 若 session 还没就绪（用户按得很快），延迟到就绪后再提交。
     func commitAudioBuffer() {
-        if sessionReady {
-            sendCommitEvents()
-        } else {
-            pendingCommit = true
-            print("[QwenRT] commit deferred: session not ready yet, queued=\(audioQueue.count)")
+        stateQueue.async { [self] in
+            if sessionReady {
+                sendCommitEvents()
+            } else {
+                pendingCommit = true
+                print("[QwenRT] commit deferred: session not ready yet, queued=\(audioQueue.count)")
+            }
         }
     }
 
