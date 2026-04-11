@@ -59,6 +59,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         requestMicrophonePermission()
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        fnMonitor.stop()
+    }
+
     // MARK: - Status Bar
 
     private func migrateDefaultModelIfNeeded() {
