@@ -26,14 +26,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var fnDownAt: CFTimeInterval = 0
     private let tapThreshold: CFTimeInterval = 0.4
 
-    private let startSound: NSSound? = {
-        guard let url = Bundle.module.url(forResource: "record-start", withExtension: "wav") else { return nil }
-        return NSSound(contentsOf: url, byReference: true)
-    }()
-    private let endSound: NSSound? = {
-        guard let url = Bundle.module.url(forResource: "record-end", withExtension: "wav") else { return nil }
-        return NSSound(contentsOf: url, byReference: true)
-    }()
+    private let startSound = AppDelegate.loadSound(named: "record-start")
+    private let endSound = AppDelegate.loadSound(named: "record-end")
 
     // Language options
     private let languages: [(code: String, name: String)] = [
@@ -43,6 +37,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ("ja-JP", "日本語"),
         ("ko-KR", "한국어"),
     ]
+
+    private static func loadSound(named name: String) -> NSSound? {
+        guard let url = Bundle.main.url(forResource: name, withExtension: "wav") else { return nil }
+        return NSSound(contentsOf: url, byReference: true)
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Register defaults

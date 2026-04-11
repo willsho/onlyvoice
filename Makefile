@@ -26,6 +26,7 @@ build: icon
 	@cp $(BUILD_DIR)/$(APP_NAME) $(APP_BUNDLE)/Contents/MacOS/
 	@cp Info.plist $(APP_BUNDLE)/Contents/
 	@cp $(ICON_FILE) $(APP_BUNDLE)/Contents/Resources/AppIcon.icns
+	@cp Sources/OnlyVoice/Resources/*.wav $(APP_BUNDLE)/Contents/Resources/
 	@codesign --force --deep --sign - \
 		--entitlements OnlyVoice.entitlements \
 		--options runtime \
