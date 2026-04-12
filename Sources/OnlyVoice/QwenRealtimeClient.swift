@@ -16,15 +16,17 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
     private var socket: WebSocket?
     private var isConnected = false
     private var sessionReady = false
+    private var isIntentionalDisconnect = false
     private var pendingTranscript = ""
-    /// 在 session 就绪之前缓冲的音频帧，避免连接/握手期间的语音被静默丢弃。
-    private var audioQueue: [String] = []
-    /// 若用户在 session 就绪前已经松手提交，先记住，等就绪后再 commit。
-    private var pendingCommit = false
+    /// 保留整轮录音，用于连接抖动后重放，避免整段语音丢失。
+    private var currentTurnAudio: [String] = []
+    /// 本轮是否已经进入 commit 阶段；重连后若仍为 true，需要重新提交整轮音频。
+    private var currentTurnCommitted = false
 
     var onTranscript: ((String) -> Void)?
     var onFinalTranscript: ((String) -> Void)?
     var onError: ((String) -> Void)?
+    var hasBufferedAudio: Bool { !currentTurnAudio.isEmpty }
 
     private var apiKey: String {
         (UserDefaults.standard.string(forKey: "dashscope_api_key") ?? "")
@@ -40,12 +42,14 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
         UserDefaults.standard.string(forKey: "selected_language") ?? "zh-CN"
     }
 
-    func connect() {
-        disconnect()
+    func connect(preserveCurrentTurn: Bool = false) {
+        disconnect(clearCurrentTurn: !preserveCurrentTurn)
         pendingTranscript = ""
         sessionReady = false
-        audioQueue.removeAll()
-        pendingCommit = false
+        if !preserveCurrentTurn {
+            currentTurnAudio.removeAll()
+            currentTurnCommitted = false
+        }
 
         guard !apiKey.isEmpty else {
             onError?("API Key not configured. Please set it in Settings.")
@@ -68,21 +72,28 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
         let ws = WebSocket(request: request, certPinner: FoundationSecurity(), compressionHandler: nil)
         ws.delegate = self
         self.socket = ws
+        isIntentionalDisconnect = false
         ws.connect()
     }
 
     // MARK: - WebSocketDelegate (Starscream)
 
     func didReceive(event: WebSocketEvent, client: WebSocketClient) {
+        if let activeSocket = socket, (client as AnyObject) !== activeSocket {
+            print("[QwenRT] ignoring event from stale socket")
+            return
+        }
+
         switch event {
         case .connected(let headers):
             print("[QwenRT] WebSocket opened, response headers=\(headers)")
             isConnected = true
+            isIntentionalDisconnect = false
             // 不立即发送 session.update；等服务端先发 session.created
         case .disconnected(let reason, let code):
             print("[QwenRT] WebSocket closed code=\(code) reason=\(reason)")
             isConnected = false
-            if code != CloseCode.normal.rawValue {
+            if !isIntentionalDisconnect {
                 DispatchQueue.main.async {
                     self.onError?(self.userFacingCloseMessage(code: code, reason: reason))
                 }
@@ -94,46 +105,67 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
         case .error(let error):
             let msg = error?.localizedDescription ?? "unknown"
             print("[QwenRT] WebSocket error: \(msg)")
-            DispatchQueue.main.async { self.onError?("WebSocket error: \(msg)") }
+            if !isIntentionalDisconnect {
+                DispatchQueue.main.async { self.onError?("WebSocket error: \(msg)") }
+            }
             isConnected = false
-        case .cancelled, .peerClosed:
+        case .cancelled:
             isConnected = false
+            if !isIntentionalDisconnect {
+                DispatchQueue.main.async {
+                    self.onError?("WebSocket connection cancelled unexpectedly.")
+                }
+            }
+        case .peerClosed:
+            isConnected = false
+            if !isIntentionalDisconnect {
+                DispatchQueue.main.async {
+                    self.onError?("WebSocket peer closed the connection unexpectedly.")
+                }
+            }
         default:
             break
         }
     }
 
-    func disconnect() {
+    func disconnect(clearCurrentTurn: Bool = true) {
+        isIntentionalDisconnect = true
         isConnected = false
         sessionReady = false
-        audioQueue.removeAll()
-        pendingCommit = false
+        if clearCurrentTurn {
+            currentTurnAudio.removeAll()
+            currentTurnCommitted = false
+        }
         socket?.disconnect()
         socket = nil
     }
 
     /// Send Base64-encoded PCM audio frame.
-    /// session 就绪前先入队，避免连接/握手窗口期内的音频被丢弃。
+    /// 当前连接可用时立即发送；同时保存整轮音频，便于重连后重放。
     func sendAudioData(_ base64Audio: String) {
+        currentTurnAudio.append(base64Audio)
+        if currentTurnAudio.count > 600 {  // ~60s 音频
+            currentTurnAudio.removeFirst(currentTurnAudio.count - 600)
+        }
+
         if sessionReady {
             sendAppendEvent(base64Audio)
-        } else {
-            audioQueue.append(base64Audio)
-            // 极端情况下避免无限增长（正常握手 1-2 秒，每秒约 10 帧 100ms 的 PCM）。
-            if audioQueue.count > 600 {  // ~60s 音频
-                audioQueue.removeFirst(audioQueue.count - 600)
-            }
         }
     }
 
     /// Commit the audio buffer (on Fn key release).
-    /// 若 session 还没就绪（用户按得很快），延迟到就绪后再提交。
     func commitAudioBuffer() {
+        guard !currentTurnAudio.isEmpty else {
+            onError?("No audio captured. Please try again.")
+            return
+        }
+
+        currentTurnCommitted = true
+
         if sessionReady {
             sendCommitEvents()
         } else {
-            pendingCommit = true
-            print("[QwenRT] commit deferred: session not ready yet, queued=\(audioQueue.count)")
+            print("[QwenRT] commit deferred: session not ready yet, queued=\(currentTurnAudio.count)")
         }
     }
 
@@ -150,15 +182,13 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
         sendJSON(["type": "response.create"])
     }
 
-    private func flushQueued() {
-        if !audioQueue.isEmpty {
-            print("[QwenRT] flushing \(audioQueue.count) buffered audio frames")
-            for frame in audioQueue { sendAppendEvent(frame) }
-            audioQueue.removeAll()
+    private func flushCurrentTurn() {
+        if !currentTurnAudio.isEmpty {
+            print("[QwenRT] replaying \(currentTurnAudio.count) buffered audio frames")
+            for frame in currentTurnAudio { sendAppendEvent(frame) }
         }
-        if pendingCommit {
-            pendingCommit = false
-            print("[QwenRT] flushing deferred commit")
+        if currentTurnCommitted {
+            print("[QwenRT] replaying deferred commit")
             sendCommitEvents()
         }
     }
@@ -253,6 +283,8 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
             // Full response complete — extract final text
             let rawFinal = extractFinalText(from: json) ?? pendingTranscript
             let finalText = Self.isEmptyPlaceholder(rawFinal) ? "" : rawFinal
+            currentTurnAudio.removeAll()
+            currentTurnCommitted = false
             DispatchQueue.main.async {
                 self.onFinalTranscript?(finalText)
             }
@@ -272,7 +304,7 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
         case "session.updated":
             print("[QwenRT] session.updated — session ready, flushing queued audio")
             sessionReady = true
-            flushQueued()
+            flushCurrentTurn()
 
         default:
             // input_audio_buffer.committed, response.created, etc.

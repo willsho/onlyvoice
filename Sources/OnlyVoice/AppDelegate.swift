@@ -15,6 +15,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var waitingForResponse = false
     /// 录音中已自动重连次数（避免无限循环）。
     private var recordingReconnectCount = 0
+    /// 已提交后等待响应阶段的自动重试次数。
+    private var responseReconnectCount = 0
 
     // Recording mode: hold-to-talk vs tap-to-toggle.
     // - Press Fn → startRecording, enter .holding
@@ -203,6 +205,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         qwenClient.onFinalTranscript = { [weak self] text in
             guard let self = self else { return }
             self.waitingForResponse = false
+            self.responseReconnectCount = 0
             self.pendingTranscript = text
 
             // Hide panel then inject text
@@ -220,16 +223,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             print("[OnlyVoice] Error: \(error)")
             guard let self = self else { return }
 
-            // 录音中出错：不要撕掉 UI 让用户白说话；尝试静默重连一次，后续音频会被
-            // QwenRealtimeClient 的队列缓冲，新 session 就绪后 flush。重连次数有限。
+            // 录音中出错：不要撕掉 UI 让用户白说话；尝试静默重连一次，整轮录音会在
+            // QwenRealtimeClient 中保留，并在新 session 就绪后重放。重连次数有限。
             if self.isRecording && self.recordingReconnectCount < 2 {
                 self.recordingReconnectCount += 1
                 print("[OnlyVoice] mid-recording error, reconnecting (attempt \(self.recordingReconnectCount))")
-                self.qwenClient.connect()
+                self.capsulePanel.updateTranscript("Reconnecting...")
+                self.qwenClient.connect(preserveCurrentTurn: true)
+                return
+            }
+
+            if self.waitingForResponse && self.responseReconnectCount < 1 {
+                self.responseReconnectCount += 1
+                print("[OnlyVoice] response-stage error, retrying (attempt \(self.responseReconnectCount))")
+                self.capsulePanel.updateTranscript("Retrying transcription...")
+                self.qwenClient.connect(preserveCurrentTurn: true)
                 return
             }
 
             self.waitingForResponse = false
+            self.responseReconnectCount = 0
             self.capsulePanel.updateTranscript("⚠ \(error)")
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                 self.capsulePanel.hide()
@@ -277,6 +290,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         isRecording = true
         pendingTranscript = ""
         recordingReconnectCount = 0
+        responseReconnectCount = 0
+        waitingForResponse = false
 
         startSound?.stop()
         startSound?.play()
@@ -313,8 +328,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         audioEngine.stop()
         endSound?.stop()
         endSound?.play()
-        qwenClient.commitAudioBuffer()
+        responseReconnectCount = 0
+
+        guard qwenClient.hasBufferedAudio else {
+            capsulePanel.updateTranscript("⚠ No audio captured")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.capsulePanel.hide()
+                self?.qwenClient.disconnect()
+                self?.updateStatusIcon(recording: false)
+            }
+            return
+        }
+
         waitingForResponse = true
+        qwenClient.commitAudioBuffer()
 
         // Update UI to show "processing"
         capsulePanel.updateRMS(0)
@@ -326,9 +353,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) { [weak self] in
             guard let self = self, self.waitingForResponse else { return }
             self.waitingForResponse = false
-            self.capsulePanel.hide()
-            self.qwenClient.disconnect()
-            self.updateStatusIcon(recording: false)
+            self.responseReconnectCount = 0
+            self.capsulePanel.updateTranscript("⚠ Transcription timed out")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                self.capsulePanel.hide()
+                self.qwenClient.disconnect()
+                self.updateStatusIcon(recording: false)
+            }
         }
     }
 
