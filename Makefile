@@ -2,7 +2,7 @@ APP_NAME = OnlyVoice
 BUILD_DIR = .build/release
 APP_BUNDLE = $(APP_NAME).app
 INSTALL_DIR = /Applications
-ICON_SCRIPT = Tools/generate_app_icon.swift
+ICON_SOURCE = AppIcon.png
 ICONSET_DIR = .build/AppIcon.iconset
 ICON_FILE = .build/AppIcon.icns
 VERSION := $(shell /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Info.plist)
@@ -23,8 +23,19 @@ SIGN_IDENTITY ?= -
 
 icon:
 	@rm -rf $(ICONSET_DIR) $(ICON_FILE)
-	@swift $(ICON_SCRIPT) $(ICONSET_DIR) $(ICON_FILE)
-	@echo "Generated $(ICON_FILE)"
+	@mkdir -p $(ICONSET_DIR)
+	@sips -z 16 16     "$(ICON_SOURCE)" --out $(ICONSET_DIR)/icon_16x16.png >/dev/null
+	@sips -z 32 32     "$(ICON_SOURCE)" --out $(ICONSET_DIR)/icon_16x16@2x.png >/dev/null
+	@sips -z 32 32     "$(ICON_SOURCE)" --out $(ICONSET_DIR)/icon_32x32.png >/dev/null
+	@sips -z 64 64     "$(ICON_SOURCE)" --out $(ICONSET_DIR)/icon_32x32@2x.png >/dev/null
+	@sips -z 128 128   "$(ICON_SOURCE)" --out $(ICONSET_DIR)/icon_128x128.png >/dev/null
+	@sips -z 256 256   "$(ICON_SOURCE)" --out $(ICONSET_DIR)/icon_128x128@2x.png >/dev/null
+	@sips -z 256 256   "$(ICON_SOURCE)" --out $(ICONSET_DIR)/icon_256x256.png >/dev/null
+	@sips -z 512 512   "$(ICON_SOURCE)" --out $(ICONSET_DIR)/icon_256x256@2x.png >/dev/null
+	@sips -z 512 512   "$(ICON_SOURCE)" --out $(ICONSET_DIR)/icon_512x512.png >/dev/null
+	@sips -z 1024 1024 "$(ICON_SOURCE)" --out $(ICONSET_DIR)/icon_512x512@2x.png >/dev/null
+	@iconutil -c icns $(ICONSET_DIR) -o $(ICON_FILE)
+	@echo "Generated $(ICON_FILE) from $(ICON_SOURCE)"
 
 build: icon
 	swift build -c release
