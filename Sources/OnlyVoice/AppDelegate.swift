@@ -106,8 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "OnlyVoice")
-            button.image?.size = NSSize(width: 18, height: 18)
+            button.image = Self.statusBarIcon(active: false)
         }
 
         let menu = NSMenu()
@@ -409,9 +408,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateStatusIcon(recording: Bool) {
         if let button = statusItem.button {
-            let symbolName = recording ? "waveform.circle.fill" : "waveform"
-            button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "OnlyVoice")
-            button.image?.size = NSSize(width: 18, height: 18)
+            button.image = Self.statusBarIcon(active: recording)
             button.toolTip = "OnlyVoice"
         }
     }
@@ -423,10 +420,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.image?.size = NSSize(width: 18, height: 18)
             button.toolTip = "OnlyVoice: Accessibility permission required — enable in System Settings → Privacy & Security → Accessibility"
         } else {
-            button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "OnlyVoice")
-            button.image?.size = NSSize(width: 18, height: 18)
+            button.image = Self.statusBarIcon(active: false)
             button.toolTip = "OnlyVoice"
         }
+    }
+
+    /// 状态栏模板图标：呼应 app icon 的「圆角屏 + 波形」造型。
+    /// active=true（录音中）时波形满振幅。isTemplate 让系统自动适配深/浅色菜单栏。
+    static func statusBarIcon(active: Bool) -> NSImage {
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
+            let frame = rect.insetBy(dx: 1.5, dy: 1.5)
+            let radius = frame.width * 0.3
+            let body = NSBezierPath(roundedRect: frame, xRadius: radius, yRadius: radius)
+            body.lineWidth = 1.4
+            NSColor.black.setStroke()
+            body.stroke()
+
+            let bars: [CGFloat] = active
+                ? [0.5, 0.8, 1.0, 0.8, 0.5]
+                : [0.34, 0.58, 0.78, 0.58, 0.34]
+            let barWidth: CGFloat = 1.3
+            let gap: CGFloat = 1.4
+            let maxHeight = frame.height * 0.5
+            let totalWidth = CGFloat(bars.count) * barWidth + CGFloat(bars.count - 1) * gap
+            var x = rect.midX - totalWidth / 2
+            NSColor.black.setFill()
+            for ratio in bars {
+                let h = maxHeight * ratio
+                let barRect = NSRect(x: x, y: rect.midY - h / 2, width: barWidth, height: h)
+                NSBezierPath(roundedRect: barRect, xRadius: barWidth / 2, yRadius: barWidth / 2).fill()
+                x += barWidth + gap
+            }
+            return true
+        }
+        image.isTemplate = true
+        return image
     }
 
     // MARK: - Permissions
