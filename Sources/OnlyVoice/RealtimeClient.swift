@@ -1,23 +1,17 @@
 import Foundation
 import Starscream
 
-enum DashScopeRealtimeDefaults {
-    static let endpoint = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
-    static let model = "qwen3-omni-flash-realtime"
-    static let models = [
-        "qwen3-omni-flash-realtime",
-        "qwen3.5-omni-flash-realtime"
-    ]
-}
-
-/// WebSocket client for Qwen-Omni-Realtime API (DashScope).
-/// Uses Manual mode: send audio frames, commit on stop, receive transcription.
-final class QwenRealtimeClient: NSObject, WebSocketDelegate {
+/// WebSocket client for OpenAI-Realtime-style transcription APIs.
+/// 支持多 provider（DashScope / StepFun），具体端点/模型/音频格式/事件路径
+/// 由 `RealtimeProvider` 提供。Manual 模式：发送音频帧，松手 commit，接收转写。
+final class RealtimeClient: NSObject, WebSocketDelegate {
     private var socket: WebSocket?
     private var isConnected = false
     private var sessionReady = false
     private var isIntentionalDisconnect = false
     private var pendingTranscript = ""
+    /// 本次连接使用的 provider，在 connect 时固定，避免中途切换造成不一致。
+    private var activeProvider: RealtimeProvider = .dashscope
     /// 保留整轮录音，用于连接抖动后重放，避免整段语音丢失。
     private var currentTurnAudio: [String] = []
     /// 本轮是否已经进入 commit 阶段；重连后若仍为 true，需要重新提交整轮音频。
@@ -28,15 +22,8 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
     var onError: ((String) -> Void)?
     var hasBufferedAudio: Bool { !currentTurnAudio.isEmpty }
 
-    private var apiKey: String {
-        (UserDefaults.standard.string(forKey: "dashscope_api_key") ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-    private var model: String {
-        let value = (UserDefaults.standard.string(forKey: "dashscope_model") ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return value.isEmpty ? DashScopeRealtimeDefaults.model : value
-    }
+    private var apiKey: String { activeProvider.apiKey }
+    private var model: String { activeProvider.model }
 
     private var language: String {
         UserDefaults.standard.string(forKey: "selected_language") ?? "zh-CN"
@@ -46,18 +33,20 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
         disconnect(clearCurrentTurn: !preserveCurrentTurn)
         pendingTranscript = ""
         sessionReady = false
+        // 固定本次连接的 provider；重连（preserveCurrentTurn）也沿用同一个。
+        activeProvider = RealtimeProvider.current
         if !preserveCurrentTurn {
             currentTurnAudio.removeAll()
             currentTurnCommitted = false
         }
 
         guard !apiKey.isEmpty else {
-            onError?("API Key not configured. Please set it in Settings.")
+            onError?("API Key not configured for \(activeProvider.displayName). Please set it in Settings.")
             return
         }
 
         let encodedModel = model.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? model
-        let urlString = "\(DashScopeRealtimeDefaults.endpoint)?model=\(encodedModel)"
+        let urlString = "\(activeProvider.endpoint)?model=\(encodedModel)"
         guard let url = URL(string: urlString) else { return }
 
         var request = URLRequest(url: url)
@@ -65,8 +54,8 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
         request.setValue("websocket-client/1.6.4", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 10
 
-        print("[QwenRT] Connecting to \(urlString) apiKeyConfigured=true")
-        print("[QwenRT] request headers = \(redactedHeaders(from: request))")
+        print("[Realtime] Connecting to \(urlString) provider=\(activeProvider.rawValue) apiKeyConfigured=true")
+        print("[Realtime] request headers = \(redactedHeaders(from: request))")
 
         // compressionHandler: nil 关闭 permessage-deflate，避免服务端因未知扩展拒绝
         let ws = WebSocket(request: request, certPinner: FoundationSecurity(), compressionHandler: nil)
@@ -80,18 +69,18 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
 
     func didReceive(event: WebSocketEvent, client: WebSocketClient) {
         if let activeSocket = socket, (client as AnyObject) !== activeSocket {
-            print("[QwenRT] ignoring event from stale socket")
+            print("[Realtime] ignoring event from stale socket")
             return
         }
 
         switch event {
         case .connected(let headers):
-            print("[QwenRT] WebSocket opened, response headers=\(headers)")
+            print("[Realtime] WebSocket opened, response headers=\(headers)")
             isConnected = true
             isIntentionalDisconnect = false
             // 不立即发送 session.update；等服务端先发 session.created
         case .disconnected(let reason, let code):
-            print("[QwenRT] WebSocket closed code=\(code) reason=\(reason)")
+            print("[Realtime] WebSocket closed code=\(code) reason=\(reason)")
             isConnected = false
             if !isIntentionalDisconnect {
                 DispatchQueue.main.async {
@@ -104,7 +93,7 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
             if let text = String(data: data, encoding: .utf8) { handleMessage(text) }
         case .error(let error):
             let msg = error?.localizedDescription ?? "unknown"
-            print("[QwenRT] WebSocket error: \(msg)")
+            print("[Realtime] WebSocket error: \(msg)")
             if !isIntentionalDisconnect {
                 DispatchQueue.main.async { self.onError?("WebSocket error: \(msg)") }
             }
@@ -165,7 +154,7 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
         if sessionReady {
             sendCommitEvents()
         } else {
-            print("[QwenRT] commit deferred: session not ready yet, queued=\(currentTurnAudio.count)")
+            print("[Realtime] commit deferred: session not ready yet, queued=\(currentTurnAudio.count)")
         }
     }
 
@@ -184,11 +173,11 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
 
     private func flushCurrentTurn() {
         if !currentTurnAudio.isEmpty {
-            print("[QwenRT] replaying \(currentTurnAudio.count) buffered audio frames")
+            print("[Realtime] replaying \(currentTurnAudio.count) buffered audio frames")
             for frame in currentTurnAudio { sendAppendEvent(frame) }
         }
         if currentTurnCommitted {
-            print("[QwenRT] replaying deferred commit")
+            print("[Realtime] replaying deferred commit")
             sendCommitEvents()
         }
     }
@@ -227,7 +216,7 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
             "session": [
                 "modalities": ["text"],
                 "instructions": instructions,
-                "input_audio_format": "pcm",
+                "input_audio_format": activeProvider.inputAudioFormat,
                 "turn_detection": NSNull()  // manual mode; client commits on Fn release
             ]
         ]
@@ -238,7 +227,7 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
         guard let data = try? JSONSerialization.data(withJSONObject: dict),
               let str = String(data: data, encoding: .utf8) else { return }
         let preview = str.count > 200 ? String(str.prefix(200)) + "…" : str
-        print("[QwenRT] -> \(preview)")
+        print("[Realtime] -> \(preview)")
         socket?.write(string: str)
     }
 
@@ -252,9 +241,9 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
 
     private func userFacingCloseMessage(code: UInt16, reason: String) -> String {
         if reason.localizedCaseInsensitiveContains("access denied") {
-            return "Qwen Realtime access denied. Check that the DashScope API Key has access to model \(model), and that the key region matches \(DashScopeRealtimeDefaults.endpoint)."
+            return "\(activeProvider.displayName) access denied. Check that the API Key has access to model \(model), and that the key matches \(activeProvider.endpoint)."
         }
-        return "Qwen Realtime connection closed (\(code)): \(reason)"
+        return "\(activeProvider.displayName) connection closed (\(code)): \(reason)"
     }
 
     private func handleMessage(_ text: String) {
@@ -263,8 +252,9 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
               let type = json["type"] as? String else { return }
 
         switch type {
-        case "response.text.delta":
-            // Streaming text delta
+        // DashScope 走 response.text.*；StepFun 走 response.audio_transcript.*。
+        // 同一会话只会触发其中一组，这里合并处理。
+        case "response.text.delta", "response.audio_transcript.delta":
             if let delta = json["delta"] as? String {
                 pendingTranscript += delta
                 let display = Self.isEmptyPlaceholder(self.pendingTranscript) ? "" : self.pendingTranscript
@@ -273,9 +263,9 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
                 }
             }
 
-        case "response.text.done":
-            // Text completion for this response item
-            if let text = json["text"] as? String {
+        case "response.text.done", "response.audio_transcript.done":
+            // text.done 用 "text" 字段；audio_transcript.done 用 "transcript" 字段。
+            if let text = json["text"] as? String ?? json["transcript"] as? String {
                 pendingTranscript = text
             }
 
@@ -298,11 +288,11 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
             }
 
         case "session.created":
-            print("[QwenRT] session.created received, sending session.update")
+            print("[Realtime] session.created received, sending session.update")
             sendSessionUpdate()
 
         case "session.updated":
-            print("[QwenRT] session.updated — session ready, flushing queued audio")
+            print("[Realtime] session.updated — session ready, flushing queued audio")
             sessionReady = true
             flushCurrentTurn()
 
@@ -331,9 +321,12 @@ final class QwenRealtimeClient: NSObject, WebSocketDelegate {
         for item in output {
             if let content = item["content"] as? [[String: Any]] {
                 for part in content {
-                    if part["type"] as? String == "text",
-                       let text = part["text"] as? String {
-                        return text
+                    let partType = part["type"] as? String
+                    // text 类型用 "text" 字段；audio 类型（StepFun）用 "transcript" 字段。
+                    if partType == "text" || partType == "audio" {
+                        if let text = part["text"] as? String ?? part["transcript"] as? String {
+                            return text
+                        }
                     }
                 }
             }

@@ -4,11 +4,12 @@ import AVFoundation
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let audioEngine = AudioEngine()
-    private let qwenClient = QwenRealtimeClient()
+    private let realtimeClient = RealtimeClient()
     private let fnMonitor = FnKeyMonitor()
     private let capsulePanel = CapsulePanel()
     private let textInjector = TextInjector()
     private var settingsController: SettingsWindowController?
+    private var providerMenu: NSMenu?
 
     private var isRecording = false
     private var pendingTranscript = ""
@@ -49,14 +50,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Register defaults
         UserDefaults.standard.register(defaults: [
             "selected_language": "zh-CN",
-            "dashscope_model": DashScopeRealtimeDefaults.model
+            RealtimeProvider.selectionKey: RealtimeProvider.dashscope.rawValue,
+            RealtimeProvider.dashscope.modelDefaultsKey: RealtimeProvider.dashscope.defaultModel,
+            RealtimeProvider.stepfun.modelDefaultsKey: RealtimeProvider.stepfun.defaultModel
         ])
         migrateDefaultModelIfNeeded()
 
         setupMainMenu()
         setupStatusBar()
         setupFnMonitor()
-        setupQwenCallbacks()
+        setupRealtimeCallbacks()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(refreshProviderMenuState),
+            name: .realtimeProviderChanged, object: nil)
         requestMicrophonePermission()
     }
 
@@ -68,12 +74,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func migrateDefaultModelIfNeeded() {
         let defaults = UserDefaults.standard
+        let key = RealtimeProvider.dashscope.modelDefaultsKey
         let previousDefaults = [
             "qwen3.5-omni-plus-realtime",
             "qwen3-omni-flash-realtime"
         ]
-        if let model = defaults.string(forKey: "dashscope_model"), previousDefaults.contains(model) {
-            defaults.set(DashScopeRealtimeDefaults.model, forKey: "dashscope_model")
+        if let model = defaults.string(forKey: key), previousDefaults.contains(model) {
+            defaults.set(RealtimeProvider.dashscope.defaultModel, forKey: key)
         }
     }
 
@@ -99,11 +106,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "OnlyVoice")
-            button.image?.size = NSSize(width: 18, height: 18)
+            button.image = Self.statusBarIcon(active: false)
         }
 
         let menu = NSMenu()
+
+        // Service provider submenu (DashScope / StepFun)
+        let providerItem = NSMenuItem(title: "Service Provider", action: nil, keyEquivalent: "")
+        let providerMenu = NSMenu()
+        let currentProvider = RealtimeProvider.current
+        for provider in RealtimeProvider.allCases {
+            let item = NSMenuItem(title: provider.displayName, action: #selector(selectProvider(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = provider.rawValue
+            if provider == currentProvider {
+                item.state = .on
+            }
+            providerMenu.addItem(item)
+        }
+        providerItem.submenu = providerMenu
+        self.providerMenu = providerMenu
+        menu.addItem(providerItem)
 
         // Spoken language submenu (the language the user speaks, not the system UI language)
         let langItem = NSMenuItem(title: "Spoken Language", action: nil, keyEquivalent: "")
@@ -125,7 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         // Settings
-        let settingsItem = NSMenuItem(title: "Qwen-Omni Settings...", action: #selector(openSettings), keyEquivalent: ",")
+        let settingsItem = NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
 
@@ -142,6 +165,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quitItem)
 
         statusItem.menu = menu
+    }
+
+    @objc private func selectProvider(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String else { return }
+        UserDefaults.standard.set(raw, forKey: RealtimeProvider.selectionKey)
+
+        // Update menu checkmarks
+        if let providerMenu = sender.menu {
+            for item in providerMenu.items {
+                item.state = (item.representedObject as? String) == raw ? .on : .off
+            }
+        }
+    }
+
+    /// 设置窗口保存后切换了 provider，同步状态栏子菜单勾选。
+    @objc private func refreshProviderMenuState() {
+        let raw = RealtimeProvider.current.rawValue
+        providerMenu?.items.forEach { item in
+            item.state = (item.representedObject as? String) == raw ? .on : .off
+        }
     }
 
     @objc private func selectLanguage(_ sender: NSMenuItem) {
@@ -166,7 +209,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showAbout() {
         let alert = NSAlert()
         alert.messageText = "OnlyVoice"
-        alert.informativeText = "Voice-to-text input for macOS.\nHold Fn to record, release to transcribe.\n\nPowered by Qwen-Omni-Realtime."
+        alert.informativeText = "Voice-to-text input for macOS.\nHold Fn to record, release to transcribe.\n\nPowered by Qwen-Omni / Step-Audio Realtime."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
         alert.runModal()
@@ -194,15 +237,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fnMonitor.start()
     }
 
-    // MARK: - Qwen Callbacks
+    // MARK: - Realtime Callbacks
 
-    private func setupQwenCallbacks() {
-        qwenClient.onTranscript = { [weak self] text in
+    private func setupRealtimeCallbacks() {
+        realtimeClient.onTranscript = { [weak self] text in
             self?.pendingTranscript = text
             self?.capsulePanel.updateTranscript(text)
         }
 
-        qwenClient.onFinalTranscript = { [weak self] text in
+        realtimeClient.onFinalTranscript = { [weak self] text in
             guard let self = self else { return }
             self.waitingForResponse = false
             self.responseReconnectCount = 0
@@ -214,22 +257,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     self.textInjector.inject(text)
                 }
-                self.qwenClient.disconnect()
+                self.realtimeClient.disconnect()
             }
             self.updateStatusIcon(recording: false)
         }
 
-        qwenClient.onError = { [weak self] error in
+        realtimeClient.onError = { [weak self] error in
             print("[OnlyVoice] Error: \(error)")
             guard let self = self else { return }
 
             // 录音中出错：不要撕掉 UI 让用户白说话；尝试静默重连一次，整轮录音会在
-            // QwenRealtimeClient 中保留，并在新 session 就绪后重放。重连次数有限。
+            // RealtimeClient 中保留，并在新 session 就绪后重放。重连次数有限。
             if self.isRecording && self.recordingReconnectCount < 2 {
                 self.recordingReconnectCount += 1
                 print("[OnlyVoice] mid-recording error, reconnecting (attempt \(self.recordingReconnectCount))")
                 self.capsulePanel.updateTranscript("Reconnecting...")
-                self.qwenClient.connect(preserveCurrentTurn: true)
+                self.realtimeClient.connect(preserveCurrentTurn: true)
                 return
             }
 
@@ -237,7 +280,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.responseReconnectCount += 1
                 print("[OnlyVoice] response-stage error, retrying (attempt \(self.responseReconnectCount))")
                 self.capsulePanel.updateTranscript("Retrying transcription...")
-                self.qwenClient.connect(preserveCurrentTurn: true)
+                self.realtimeClient.connect(preserveCurrentTurn: true)
                 return
             }
 
@@ -246,7 +289,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.capsulePanel.updateTranscript("⚠ \(error)")
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                 self.capsulePanel.hide()
-                self.qwenClient.disconnect()
+                self.realtimeClient.disconnect()
             }
             self.updateStatusIcon(recording: false)
         }
@@ -299,15 +342,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateStatusIcon(recording: true)
         capsulePanel.show()
 
-        // Connect to Qwen and start audio
-        qwenClient.connect()
+        // Connect to the realtime service and start audio
+        realtimeClient.connect()
 
         audioEngine.onRMSLevel = { [weak self] rms in
             self?.capsulePanel.updateRMS(rms)
         }
 
         audioEngine.onAudioData = { [weak self] base64Audio in
-            self?.qwenClient.sendAudioData(base64Audio)
+            self?.realtimeClient.sendAudioData(base64Audio)
         }
 
         do {
@@ -330,18 +373,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         endSound?.play()
         responseReconnectCount = 0
 
-        guard qwenClient.hasBufferedAudio else {
+        guard realtimeClient.hasBufferedAudio else {
             capsulePanel.updateTranscript("⚠ No audio captured")
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
                 self?.capsulePanel.hide()
-                self?.qwenClient.disconnect()
+                self?.realtimeClient.disconnect()
                 self?.updateStatusIcon(recording: false)
             }
             return
         }
 
         waitingForResponse = true
-        qwenClient.commitAudioBuffer()
+        realtimeClient.commitAudioBuffer()
 
         // Update UI to show "processing"
         capsulePanel.updateRMS(0)
@@ -357,7 +400,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.capsulePanel.updateTranscript("⚠ Transcription timed out")
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                 self.capsulePanel.hide()
-                self.qwenClient.disconnect()
+                self.realtimeClient.disconnect()
                 self.updateStatusIcon(recording: false)
             }
         }
@@ -365,9 +408,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateStatusIcon(recording: Bool) {
         if let button = statusItem.button {
-            let symbolName = recording ? "waveform.circle.fill" : "waveform"
-            button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "OnlyVoice")
-            button.image?.size = NSSize(width: 18, height: 18)
+            button.image = Self.statusBarIcon(active: recording)
             button.toolTip = "OnlyVoice"
         }
     }
@@ -379,10 +420,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.image?.size = NSSize(width: 18, height: 18)
             button.toolTip = "OnlyVoice: Accessibility permission required — enable in System Settings → Privacy & Security → Accessibility"
         } else {
-            button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "OnlyVoice")
-            button.image?.size = NSSize(width: 18, height: 18)
+            button.image = Self.statusBarIcon(active: false)
             button.toolTip = "OnlyVoice"
         }
+    }
+
+    /// 状态栏模板图标：呼应 app icon 的「圆角屏 + 波形」造型。
+    /// active=true（录音中）时波形满振幅。isTemplate 让系统自动适配深/浅色菜单栏。
+    static func statusBarIcon(active: Bool) -> NSImage {
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
+            let frame = rect.insetBy(dx: 1.5, dy: 1.5)
+            let radius = frame.width * 0.3
+            let body = NSBezierPath(roundedRect: frame, xRadius: radius, yRadius: radius)
+            body.lineWidth = 1.4
+            NSColor.black.setStroke()
+            body.stroke()
+
+            let bars: [CGFloat] = active
+                ? [0.5, 0.8, 1.0, 0.8, 0.5]
+                : [0.34, 0.58, 0.78, 0.58, 0.34]
+            let barWidth: CGFloat = 1.3
+            let gap: CGFloat = 1.4
+            let maxHeight = frame.height * 0.5
+            let totalWidth = CGFloat(bars.count) * barWidth + CGFloat(bars.count - 1) * gap
+            var x = rect.midX - totalWidth / 2
+            NSColor.black.setFill()
+            for ratio in bars {
+                let h = maxHeight * ratio
+                let barRect = NSRect(x: x, y: rect.midY - h / 2, width: barWidth, height: h)
+                NSBezierPath(roundedRect: barRect, xRadius: barWidth / 2, yRadius: barWidth / 2).fill()
+                x += barWidth + gap
+            }
+            return true
+        }
+        image.isTemplate = true
+        return image
     }
 
     // MARK: - Permissions

@@ -1,7 +1,8 @@
 import Cocoa
 
-/// Settings window for configuring DashScope API Key and Model.
+/// Settings window: 选择服务商并配置各自的 API Key 与模型。
 final class SettingsWindowController: NSWindowController {
+    private var providerPopup: NSPopUpButton!
     private var apiKeyField: NSSecureTextField!
     private var apiKeyPlainField: NSTextField!
     private var revealButton: NSButton!
@@ -13,12 +14,12 @@ final class SettingsWindowController: NSWindowController {
 
     convenience init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 220),
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 260),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
-        window.title = "Qwen-Omni Settings"
+        window.title = "OnlyVoice Settings"
         window.center()
         window.isReleasedWhenClosed = false
 
@@ -33,6 +34,24 @@ final class SettingsWindowController: NSWindowController {
         let padding: CGFloat = 20
         let labelWidth: CGFloat = 80
         let fieldHeight: CGFloat = 28
+        let fieldX = padding + labelWidth + 8
+        let fieldWidth: CGFloat = 318
+
+        // Provider label + popup
+        let providerLabel = NSTextField(labelWithString: "Provider:")
+        providerLabel.frame = NSRect(x: padding, y: 205, width: labelWidth, height: 18)
+        providerLabel.alignment = .right
+        providerLabel.font = NSFont.systemFont(ofSize: 13)
+        contentView.addSubview(providerLabel)
+
+        providerPopup = NSPopUpButton(frame: NSRect(x: fieldX, y: 200, width: 350, height: fieldHeight), pullsDown: false)
+        for provider in RealtimeProvider.allCases {
+            providerPopup.addItem(withTitle: provider.displayName)
+            providerPopup.lastItem?.representedObject = provider.rawValue
+        }
+        providerPopup.target = self
+        providerPopup.action = #selector(providerChanged)
+        contentView.addSubview(providerPopup)
 
         // API Key label
         let apiKeyLabel = NSTextField(labelWithString: "API Key:")
@@ -42,15 +61,13 @@ final class SettingsWindowController: NSWindowController {
         contentView.addSubview(apiKeyLabel)
 
         // API Key field (secure) and plain field overlay for reveal toggle
-        let fieldX = padding + labelWidth + 8
-        let fieldWidth: CGFloat = 318
         apiKeyField = NSSecureTextField(frame: NSRect(x: fieldX, y: 160, width: fieldWidth, height: fieldHeight))
-        apiKeyField.placeholderString = "Enter your DashScope API Key"
+        apiKeyField.placeholderString = "Enter your API Key"
         apiKeyField.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         contentView.addSubview(apiKeyField)
 
         apiKeyPlainField = NSTextField(frame: NSRect(x: fieldX, y: 160, width: fieldWidth, height: fieldHeight))
-        apiKeyPlainField.placeholderString = "Enter your DashScope API Key"
+        apiKeyPlainField.placeholderString = "Enter your API Key"
         apiKeyPlainField.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         apiKeyPlainField.isHidden = true
         contentView.addSubview(apiKeyPlainField)
@@ -73,13 +90,10 @@ final class SettingsWindowController: NSWindowController {
         contentView.addSubview(modelLabel)
 
         // Model field
-        modelField = NSComboBox(frame: NSRect(x: padding + labelWidth + 8, y: 120, width: 350, height: fieldHeight))
-        modelField.placeholderString = DashScopeRealtimeDefaults.model
+        modelField = NSComboBox(frame: NSRect(x: fieldX, y: 120, width: 350, height: fieldHeight))
         modelField.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         modelField.isEditable = true
         modelField.completes = true
-        modelField.numberOfVisibleItems = DashScopeRealtimeDefaults.models.count
-        modelField.addItems(withObjectValues: DashScopeRealtimeDefaults.models)
         contentView.addSubview(modelField)
 
         // Status label
@@ -105,6 +119,24 @@ final class SettingsWindowController: NSWindowController {
         contentView.addSubview(saveButton)
     }
 
+    private func selectedProvider() -> RealtimeProvider {
+        if let raw = providerPopup.selectedItem?.representedObject as? String,
+           let provider = RealtimeProvider(rawValue: raw) {
+            return provider
+        }
+        return .dashscope
+    }
+
+    @objc private func providerChanged() {
+        // 切换服务商：丢弃未保存的编辑，载入目标服务商已存的配置。
+        apiKeyRevealed = false
+        apiKeyField.isHidden = false
+        apiKeyPlainField.isHidden = true
+        revealButton.image = NSImage(systemSymbolName: "eye", accessibilityDescription: "Show API Key")
+        loadSettings(for: selectedProvider())
+        statusLabel.stringValue = ""
+    }
+
     @objc private func toggleRevealAPIKey() {
         apiKeyRevealed.toggle()
         if apiKeyRevealed {
@@ -126,25 +158,41 @@ final class SettingsWindowController: NSWindowController {
     }
 
     private func loadSettings() {
+        let current = RealtimeProvider.current
+        providerPopup.selectItem(withTitle: current.displayName)
+        loadSettings(for: current)
+    }
+
+    private func loadSettings(for provider: RealtimeProvider) {
         let defaults = UserDefaults.standard
-        let key = defaults.string(forKey: "dashscope_api_key") ?? ""
+        let key = defaults.string(forKey: provider.apiKeyDefaultsKey) ?? ""
         apiKeyField.stringValue = key
         apiKeyPlainField.stringValue = key
-        let model = defaults.string(forKey: "dashscope_model") ?? DashScopeRealtimeDefaults.model
+
+        modelField.removeAllItems()
+        modelField.addItems(withObjectValues: provider.models)
+        modelField.numberOfVisibleItems = provider.models.count
+        modelField.placeholderString = provider.defaultModel
+        let model = defaults.string(forKey: provider.modelDefaultsKey) ?? provider.defaultModel
         addModelToDropdownIfNeeded(model)
         modelField.stringValue = model
     }
 
     @objc private func saveSettings() {
         let defaults = UserDefaults.standard
-        let apiKey = currentAPIKey()
-        defaults.set(apiKey, forKey: "dashscope_api_key")
+        let provider = selectedProvider()
+
+        defaults.set(currentAPIKey(), forKey: provider.apiKeyDefaultsKey)
 
         let model = modelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        defaults.set(model.isEmpty ? DashScopeRealtimeDefaults.model : model, forKey: "dashscope_model")
+        defaults.set(model.isEmpty ? provider.defaultModel : model, forKey: provider.modelDefaultsKey)
+
+        // 保存即启用所选服务商，并通知状态栏菜单同步勾选。
+        defaults.set(provider.rawValue, forKey: RealtimeProvider.selectionKey)
+        NotificationCenter.default.post(name: .realtimeProviderChanged, object: nil)
 
         statusLabel.textColor = .systemGreen
-        statusLabel.stringValue = "Settings saved."
+        statusLabel.stringValue = "Settings saved. Using \(provider.displayName)."
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             self?.window?.close()
@@ -152,6 +200,7 @@ final class SettingsWindowController: NSWindowController {
     }
 
     @objc private func testConnection() {
+        let provider = selectedProvider()
         let apiKey = currentAPIKey()
         guard !apiKey.isEmpty else {
             statusLabel.textColor = .systemRed
@@ -164,11 +213,11 @@ final class SettingsWindowController: NSWindowController {
         testButton.isEnabled = false
 
         let model = modelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let modelName = model.isEmpty ? DashScopeRealtimeDefaults.model : model
+        let modelName = model.isEmpty ? provider.defaultModel : model
 
         // Test via Realtime WebSocket handshake.
         let encodedModel = modelName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? modelName
-        let urlString = "\(DashScopeRealtimeDefaults.endpoint)?model=\(encodedModel)"
+        let urlString = "\(provider.endpoint)?model=\(encodedModel)"
         guard let url = URL(string: urlString) else { return }
 
         var request = URLRequest(url: url)
