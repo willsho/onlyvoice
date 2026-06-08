@@ -3,6 +3,8 @@ import Foundation
 extension Notification.Name {
     /// 当前启用的 provider 发生变化（菜单或设置窗口触发），用于刷新 UI 勾选状态。
     static let realtimeProviderChanged = Notification.Name("realtimeProviderChanged")
+    /// 口语语言发生变化（菜单或设置窗口触发），用于刷新菜单勾选状态。
+    static let spokenLanguageChanged = Notification.Name("spokenLanguageChanged")
 }
 
 /// 实时转写服务提供方。两家都是 OpenAI Realtime 协议的克隆，差异仅在

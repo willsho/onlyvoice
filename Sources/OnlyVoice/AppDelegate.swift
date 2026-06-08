@@ -8,8 +8,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let fnMonitor = FnKeyMonitor()
     private let capsulePanel = CapsulePanel()
     private let textInjector = TextInjector()
-    private var settingsController: SettingsWindowController?
     private var providerMenu: NSMenu?
+    private var languageMenu: NSMenu?
 
     private var isRecording = false
     private var pendingTranscript = ""
@@ -63,6 +63,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(
             self, selector: #selector(refreshProviderMenuState),
             name: .realtimeProviderChanged, object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(refreshLanguageMenuState),
+            name: .spokenLanguageChanged, object: nil)
         requestMicrophonePermission()
     }
 
@@ -143,6 +146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             langMenu.addItem(item)
         }
         langItem.submenu = langMenu
+        self.languageMenu = langMenu
         menu.addItem(langItem)
 
         menu.addItem(.separator())
@@ -179,11 +183,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// 设置窗口保存后切换了 provider，同步状态栏子菜单勾选。
+    /// 设置窗口切换了 provider，同步状态栏子菜单勾选。
     @objc private func refreshProviderMenuState() {
         let raw = RealtimeProvider.current.rawValue
         providerMenu?.items.forEach { item in
             item.state = (item.representedObject as? String) == raw ? .on : .off
+        }
+    }
+
+    /// 设置窗口切换了口语语言，同步状态栏子菜单勾选。
+    @objc private func refreshLanguageMenuState() {
+        let code = UserDefaults.standard.string(forKey: "selected_language") ?? "zh-CN"
+        languageMenu?.items.forEach { item in
+            item.state = (item.representedObject as? String) == code ? .on : .off
         }
     }
 
@@ -200,19 +212,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openSettings() {
-        if settingsController == nil {
-            settingsController = SettingsWindowController()
-        }
-        settingsController?.showWindow()
+        SettingsWindowController.show()
     }
 
     @objc private func showAbout() {
-        let alert = NSAlert()
-        alert.messageText = "OnlyVoice"
-        alert.informativeText = "Voice-to-text input for macOS.\nHold Fn to record, release to transcribe.\n\nPowered by Qwen-Omni / Step-Audio Realtime."
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
+        SettingsWindowController.show(tab: .about)
     }
 
     @objc private func quitApp() {
