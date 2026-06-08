@@ -6,7 +6,7 @@ final class CapsulePanel {
     private var panel: NSPanel?
     private var waveformView: WaveformView?
     private var textLabel: NSTextField?
-    private var containerView: NSVisualEffectView?
+    private var glassView: NSView?
     private var shadowView: NSView?
 
     private let shadowInset: CGFloat = 24
@@ -68,32 +68,29 @@ final class CapsulePanel {
         root.addSubview(shadowHost)
         self.shadowView = shadowHost
 
-        // Visual effect background (clipped to capsule shape)
-        let effectView = NSVisualEffectView()
-        effectView.material = .hudWindow
-        effectView.state = .active
-        effectView.blendingMode = .behindWindow
-        effectView.wantsLayer = true
-        effectView.layer?.cornerRadius = cornerRadius
-        effectView.layer?.masksToBounds = true
-        effectView.translatesAutoresizingMaskIntoConstraints = false
-        shadowHost.addSubview(effectView)
-        self.containerView = effectView
+        // Background: Liquid Glass on macOS 26+, visual-effect blur fallback otherwise.
+        // `contentHost` is where the waveform + label live; on Liquid Glass it is the
+        // glass view's `contentView`, on the fallback it's the visual-effect view itself.
+        let (background, contentHost, contentColor) = Self.makeGlassBackground(cornerRadius: cornerRadius)
+        background.translatesAutoresizingMaskIntoConstraints = false
+        shadowHost.addSubview(background)
+        self.glassView = background
 
         // Waveform view
         let waveform = WaveformView(frame: NSRect(x: 0, y: 0, width: waveformSize.width, height: waveformSize.height))
+        waveform.barColor = contentColor
         waveform.translatesAutoresizingMaskIntoConstraints = false
-        effectView.addSubview(waveform)
+        contentHost.addSubview(waveform)
         self.waveformView = waveform
 
         // Text label
         let label = NSTextField(labelWithString: "")
         label.font = NSFont.systemFont(ofSize: 15, weight: .medium)
-        label.textColor = .white
+        label.textColor = contentColor
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 1
         label.translatesAutoresizingMaskIntoConstraints = false
-        effectView.addSubview(label)
+        contentHost.addSubview(label)
         self.textLabel = label
 
         // Constraints
@@ -106,19 +103,19 @@ final class CapsulePanel {
             shadowHost.heightAnchor.constraint(equalToConstant: capsuleHeight),
             wc,
 
-            effectView.leadingAnchor.constraint(equalTo: shadowHost.leadingAnchor),
-            effectView.trailingAnchor.constraint(equalTo: shadowHost.trailingAnchor),
-            effectView.topAnchor.constraint(equalTo: shadowHost.topAnchor),
-            effectView.bottomAnchor.constraint(equalTo: shadowHost.bottomAnchor),
+            background.leadingAnchor.constraint(equalTo: shadowHost.leadingAnchor),
+            background.trailingAnchor.constraint(equalTo: shadowHost.trailingAnchor),
+            background.topAnchor.constraint(equalTo: shadowHost.topAnchor),
+            background.bottomAnchor.constraint(equalTo: shadowHost.bottomAnchor),
 
-            waveform.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: horizontalPadding),
-            waveform.centerYAnchor.constraint(equalTo: effectView.centerYAnchor),
+            waveform.leadingAnchor.constraint(equalTo: contentHost.leadingAnchor, constant: horizontalPadding),
+            waveform.centerYAnchor.constraint(equalTo: contentHost.centerYAnchor),
             waveform.widthAnchor.constraint(equalToConstant: waveformSize.width),
             waveform.heightAnchor.constraint(equalToConstant: waveformSize.height),
 
             label.leadingAnchor.constraint(equalTo: waveform.trailingAnchor, constant: elementSpacing),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: effectView.trailingAnchor, constant: -horizontalPadding),
-            label.centerYAnchor.constraint(equalTo: effectView.centerYAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: contentHost.trailingAnchor, constant: -horizontalPadding),
+            label.centerYAnchor.constraint(equalTo: contentHost.centerYAnchor),
         ])
 
         // Position at bottom center of main screen
@@ -177,7 +174,7 @@ final class CapsulePanel {
             self?.waveformView?.reset()
             self?.waveformView = nil
             self?.textLabel = nil
-            self?.containerView = nil
+            self?.glassView = nil
             self?.shadowView = nil
             self?.panel = nil
             self?.currentText = ""
@@ -226,6 +223,31 @@ final class CapsulePanel {
     }
 
     // MARK: - Private
+
+    /// Builds the capsule background. On macOS 26+ this is a true Liquid Glass
+    /// view (`NSGlassEffectView`); older systems fall back to a HUD blur.
+    /// Returns the background view plus the view that should host the content.
+    private static func makeGlassBackground(cornerRadius: CGFloat) -> (background: NSView, contentHost: NSView, contentColor: NSColor) {
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView()
+            glass.cornerRadius = cornerRadius
+            let host = NSView()
+            glass.contentView = host
+            // Liquid Glass is adaptive (light/dark) — use a semantic color so the
+            // waveform and text stay legible over any background.
+            return (glass, host, .labelColor)
+        } else {
+            let effect = NSVisualEffectView()
+            effect.material = .hudWindow
+            effect.state = .active
+            effect.blendingMode = .behindWindow
+            effect.wantsLayer = true
+            effect.layer?.cornerRadius = cornerRadius
+            effect.layer?.masksToBounds = true
+            // HUD material is always dark — keep the content white.
+            return (effect, effect, .white)
+        }
+    }
 
     private func positionPanel(_ panel: NSPanel, width: CGFloat) {
         guard let screen = NSScreen.main else { return }

@@ -2,6 +2,10 @@ import Cocoa
 
 /// 5-bar waveform visualization driven by real-time audio RMS levels.
 final class WaveformView: NSView {
+    /// Fill color for the bars. The capsule sets this: an adaptive label color on
+    /// Liquid Glass (macOS 26+), white on the dark HUD fallback.
+    var barColor: NSColor = .labelColor
+
     /// Bar weights: center-high, sides-low for natural voice shape
     private let barWeights: [Float] = [0.5, 0.8, 1.0, 0.75, 0.55]
     private let barCount = 5
@@ -95,8 +99,6 @@ final class WaveformView: NSView {
     // MARK: - Drawing
 
     override func draw(_ dirtyRect: NSRect) {
-        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-
         let totalWidth = CGFloat(barCount) * barWidth + CGFloat(barCount - 1) * barSpacing
         let startX = (bounds.width - totalWidth) / 2
         let centerY = bounds.height / 2
@@ -110,9 +112,9 @@ final class WaveformView: NSView {
             let rect = CGRect(x: x, y: y, width: barWidth, height: barHeight)
             let path = NSBezierPath(roundedRect: rect, xRadius: barWidth / 2, yRadius: barWidth / 2)
 
-            // White bars with slight opacity variation based on level
+            // Bars adapt to the capsule's content color; opacity tracks level.
             let alpha = 0.6 + 0.4 * level
-            ctx.setFillColor(NSColor.white.withAlphaComponent(alpha).cgColor)
+            barColor.withAlphaComponent(alpha).setFill()
             path.fill()
         }
     }
