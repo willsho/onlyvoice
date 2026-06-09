@@ -420,8 +420,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateStatusIcon(permissionNeeded: Bool) {
         guard let button = statusItem.button else { return }
         if permissionNeeded {
-            button.image = NSImage(systemSymbolName: "waveform.badge.exclamationmark", accessibilityDescription: "OnlyVoice - Permission Required")
-            button.image?.size = NSSize(width: 18, height: 18)
+            button.image = Self.statusBarIcon(active: false, needsPermission: true)
             button.toolTip = "OnlyVoice: Accessibility permission required — enable in System Settings → Privacy & Security → Accessibility"
         } else {
             button.image = Self.statusBarIcon(active: false)
@@ -430,8 +429,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// 状态栏模板图标：呼应 app icon 的「圆角屏 + 波形」造型。
-    /// active=true（录音中）时波形满振幅。isTemplate 让系统自动适配深/浅色菜单栏。
-    static func statusBarIcon(active: Bool) -> NSImage {
+    /// active=true（录音中）时波形满振幅；needsPermission=true 时屏内画感叹号，
+    /// 提示辅助功能未授权。isTemplate 让系统自动适配深/浅色菜单栏。
+    static func statusBarIcon(active: Bool, needsPermission: Bool = false) -> NSImage {
         let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
             let frame = rect.insetBy(dx: 1.5, dy: 1.5)
             let radius = frame.width * 0.3
@@ -439,6 +439,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             body.lineWidth = 1.4
             NSColor.black.setStroke()
             body.stroke()
+
+            NSColor.black.setFill()
+
+            if needsPermission {
+                // 屏内感叹号：竖条 + 圆点，明确提示「未授权 / 需注意」。
+                let barWidth: CGFloat = 1.6
+                let inset = frame.height * 0.24
+                let dotSize: CGFloat = 1.8
+                let dotGap: CGFloat = 1.7
+                let dotBottom = frame.minY + inset
+                let barBottom = dotBottom + dotSize + dotGap
+                let barTop = frame.maxY - inset
+                let barRect = NSRect(x: rect.midX - barWidth / 2, y: barBottom,
+                                     width: barWidth, height: barTop - barBottom)
+                NSBezierPath(roundedRect: barRect, xRadius: barWidth / 2, yRadius: barWidth / 2).fill()
+                let dotRect = NSRect(x: rect.midX - dotSize / 2, y: dotBottom,
+                                     width: dotSize, height: dotSize)
+                NSBezierPath(ovalIn: dotRect).fill()
+                return true
+            }
 
             let bars: [CGFloat] = active
                 ? [0.5, 0.8, 1.0, 0.8, 0.5]
@@ -448,7 +468,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let maxHeight = frame.height * 0.5
             let totalWidth = CGFloat(bars.count) * barWidth + CGFloat(bars.count - 1) * gap
             var x = rect.midX - totalWidth / 2
-            NSColor.black.setFill()
             for ratio in bars {
                 let h = maxHeight * ratio
                 let barRect = NSRect(x: x, y: rect.midY - h / 2, width: barWidth, height: h)
