@@ -2,13 +2,14 @@ import Cocoa
 import Carbon
 import ApplicationServices
 
-/// Monitors Fn key press/release globally.
-/// Preferred path: remap Fn/Globe to F18 at the HID layer so macOS never shows
-/// the input-source picker. Fallback path keeps the previous event-tap based
-/// interception and input source restoration logic.
-final class FnKeyMonitor {
-    var onFnDown: (() -> Void)?
-    var onFnUp: (() -> Void)?
+/// Monitors the user-configured recording hotkey globally (default: Fn).
+/// Fn preferred path: remap Fn/Globe to F18 at the HID layer so macOS never
+/// shows the input-source picker; fallback keeps event-tap interception plus
+/// input source restoration. Other hotkeys (lone modifier / key combo) are
+/// matched and suppressed directly in the event tap.
+final class HotkeyMonitor {
+    var onHotkeyDown: (() -> Void)?
+    var onHotkeyUp: (() -> Void)?
     /// Called when accessibility permission is required but not yet granted.
     var onPermissionRequired: (() -> Void)?
     /// Called when accessibility permission is granted and event tap is active.
@@ -17,6 +18,8 @@ final class FnKeyMonitor {
     private enum TriggerMode {
         case remappedF18
         case nativeFn
+        case modifierKey(keyCode: Int64, mask: CGEventFlags)
+        case comboKey(keyCode: Int64, requiredFlags: CGEventFlags)
     }
 
     private static let remappedF18KeyCode: Int64 = 79
@@ -25,7 +28,8 @@ final class FnKeyMonitor {
     private static let f18HIDUsage: UInt64 = 0x70000006D
     private static let hidSrcKey = "HIDKeyboardModifierMappingSrc"
     private static let hidDstKey = "HIDKeyboardModifierMappingDst"
-    private static let remapDefaultsKey = "onlyvoice_fn_remap_active"
+    /// Settings 的快捷键录制界面也要读这个 key：remap 生效期间按 Fn 实际产生 F18。
+    static let remapDefaultsKey = "onlyvoice_fn_remap_active"
     private static let restoreRetryInterval: TimeInterval = 0.05
     private static let restoreRetryCount = 12
     private static let restoreWindow: CFTimeInterval = 1.0
@@ -33,11 +37,13 @@ final class FnKeyMonitor {
     fileprivate var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var inputSourceObserver: NSObjectProtocol?
-    private var fnIsDown = false
+    private var triggerIsDown = false
     private var permissionPollTimer: Timer?
     private var triggerMode: TriggerMode = .nativeFn
     private var fnRemapActive = false
     private var fnRemapInstalledByOnlyVoice = false
+    /// 设置界面录制快捷键期间为 true：event tap 不匹配、全部放行。
+    private var isSuspended = false
 
     /// Input source saved when Fn is pressed, restored on release to undo
     /// any system-level input method switch that we cannot suppress via event tap.
@@ -57,7 +63,7 @@ final class FnKeyMonitor {
         cleanupStaleFnRemapIfNeeded()
 
         if !ensureAccessibilityPermission(prompt: true) {
-            print("[FnKeyMonitor] Accessibility permission not granted yet. Polling until granted...")
+            print("[HotkeyMonitor] Accessibility permission not granted yet. Polling until granted...")
             DispatchQueue.main.async { self.onPermissionRequired?() }
             startPermissionPolling()
             return
@@ -80,7 +86,7 @@ final class FnKeyMonitor {
             callback: fnKeyCallback,
             userInfo: selfPtr
         ) else {
-            print("[FnKeyMonitor] Failed to create event tap. Check Accessibility permissions.")
+            print("[HotkeyMonitor] Failed to create event tap. Check Accessibility permissions.")
             stopObservingInputSourceChanges()
             removeFnRemapIfNeeded()
             return
@@ -105,10 +111,27 @@ final class FnKeyMonitor {
         }
         eventTap = nil
         runLoopSource = nil
-        fnIsDown = false
+        triggerIsDown = false
         restoreDeadline = 0
         triggerMode = .nativeFn
         fnRemapInstalledByOnlyVoice = false
+    }
+
+    // MARK: - Hotkey Capture Suspension
+
+    /// 录制新快捷键时暂停匹配（事件全部放行进设置窗口）。
+    /// Fn remap 保持安装，录制端把 F18 keyDown 视作 Fn。
+    func suspendMonitoring() {
+        isSuspended = true
+        triggerIsDown = false
+    }
+
+    /// 录制结束：重新读取 RecordingHotkey 并按新配置接管。
+    func resumeMonitoring() {
+        isSuspended = false
+        triggerIsDown = false
+        guard eventTap != nil else { return }
+        configureTriggerMode()
     }
 
     // MARK: - Permission Polling
@@ -118,7 +141,7 @@ final class FnKeyMonitor {
         permissionPollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             if AXIsProcessTrusted() {
-                print("[FnKeyMonitor] Accessibility permission granted, starting event tap.")
+                print("[HotkeyMonitor] Accessibility permission granted, starting event tap.")
                 self.stopPermissionPolling()
                 self.start()
                 DispatchQueue.main.async { self.onPermissionGranted?() }
@@ -134,12 +157,25 @@ final class FnKeyMonitor {
     // MARK: - HID Remapping
 
     private func configureTriggerMode() {
-        if applyFnRemapIfPossible() {
-            triggerMode = .remappedF18
-            print("[FnKeyMonitor] Using Fn->F18 remap.")
-        } else {
-            triggerMode = .nativeFn
-            print("[FnKeyMonitor] Fn remap unavailable, falling back to native interception.")
+        switch RecordingHotkey.current {
+        case .fn:
+            if applyFnRemapIfPossible() {
+                triggerMode = .remappedF18
+                print("[HotkeyMonitor] Using Fn->F18 remap.")
+            } else {
+                triggerMode = .nativeFn
+                print("[HotkeyMonitor] Fn remap unavailable, falling back to native interception.")
+            }
+        case .modifier(let keyCode):
+            removeFnRemapIfNeeded()
+            triggerMode = .modifierKey(keyCode: keyCode,
+                                       mask: KeyNames.cgModifierMask(for: keyCode) ?? [])
+            print("[HotkeyMonitor] Using modifier key trigger (keycode \(keyCode)).")
+        case .key(let keyCode, let modifiers):
+            removeFnRemapIfNeeded()
+            triggerMode = .comboKey(keyCode: keyCode,
+                                    requiredFlags: KeyNames.cgFlags(fromModifiers: modifiers))
+            print("[HotkeyMonitor] Using key trigger (keycode \(keyCode), modifiers \(modifiers)).")
         }
     }
 
@@ -183,6 +219,11 @@ final class FnKeyMonitor {
         return success
     }
 
+    /// Parses `hidutil property --get UserKeyMapping` output.
+    /// macOS <= 26 prints a single plist array; macOS 27 prints a per-device
+    /// table (RegistryID / Key / Value) where numbers may appear as quoted
+    /// signed values. Extracting Src/Dst pairs via regex and deduplicating
+    /// handles both formats.
     private func fetchUserKeyMappings() -> [[String: UInt64]]? {
         guard let output = runHidutil(arguments: ["property", "--get", "UserKeyMapping"]) else {
             return nil
@@ -193,26 +234,41 @@ final class FnKeyMonitor {
             return []
         }
 
-        guard let data = trimmed.data(using: .utf8) else { return nil }
+        var mappings: [[String: UInt64]] = []
+        var seenPairs = Set<String>()
 
-        do {
-            var format = PropertyListSerialization.PropertyListFormat.openStep
-            let plist = try PropertyListSerialization.propertyList(from: data, options: [], format: &format)
-            guard let items = plist as? [[String: Any]] else { return nil }
-            return items.compactMap { item in
-                guard let src = (item[Self.hidSrcKey] as? NSNumber)?.uint64Value,
-                      let dst = (item[Self.hidDstKey] as? NSNumber)?.uint64Value else {
-                    return nil
-                }
-                return [
-                    Self.hidSrcKey: src,
-                    Self.hidDstKey: dst
-                ]
+        let dictRegex = try! NSRegularExpression(pattern: "\\{[^{}]*\\}")
+        let fullRange = NSRange(trimmed.startIndex..., in: trimmed)
+        for match in dictRegex.matches(in: trimmed, range: fullRange) {
+            guard let range = Range(match.range, in: trimmed) else { continue }
+            let body = String(trimmed[range])
+            guard let src = Self.hidMappingValue(in: body, key: Self.hidSrcKey),
+                  let dst = Self.hidMappingValue(in: body, key: Self.hidDstKey) else {
+                continue
             }
-        } catch {
-            print("[FnKeyMonitor] Failed to parse hidutil mappings: \(error)")
+            let pairKey = "\(src)->\(dst)"
+            guard seenPairs.insert(pairKey).inserted else { continue }
+            mappings.append([
+                Self.hidSrcKey: src,
+                Self.hidDstKey: dst
+            ])
+        }
+
+        return mappings
+    }
+
+    private static func hidMappingValue(in body: String, key: String) -> UInt64? {
+        guard let regex = try? NSRegularExpression(pattern: "\(key)\\s*=\\s*\"?(-?\\d+)\"?"),
+              let match = regex.firstMatch(in: body, range: NSRange(body.startIndex..., in: body)),
+              let range = Range(match.range(at: 1), in: body) else {
             return nil
         }
+        let literal = String(body[range])
+        if literal.hasPrefix("-") {
+            guard let signed = Int64(literal) else { return nil }
+            return UInt64(bitPattern: signed)
+        }
+        return UInt64(literal)
     }
 
     private func setUserKeyMappings(_ mappings: [[String: UInt64]]) -> Bool {
@@ -247,7 +303,7 @@ final class FnKeyMonitor {
             try task.run()
             task.waitUntilExit()
         } catch {
-            print("[FnKeyMonitor] Failed to launch hidutil: \(error)")
+            print("[HotkeyMonitor] Failed to launch hidutil: \(error)")
             return nil
         }
 
@@ -257,7 +313,7 @@ final class FnKeyMonitor {
         guard task.terminationStatus == 0 else {
             if let message = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
                !message.isEmpty {
-                print("[FnKeyMonitor] hidutil failed: \(message)")
+                print("[HotkeyMonitor] hidutil failed: \(message)")
             }
             return nil
         }
@@ -348,7 +404,7 @@ final class FnKeyMonitor {
     }
 
     private func handleSelectedInputSourceChanged() {
-        guard triggerMode == .nativeFn,
+        guard case .nativeFn = triggerMode,
               CACurrentMediaTime() <= restoreDeadline,
               let saved = savedInputSource,
               let savedID = savedInputSourceID else { return }
@@ -378,11 +434,16 @@ final class FnKeyMonitor {
     // MARK: - Event Handling
 
     fileprivate func handleEvent(_ event: CGEvent, type: CGEventType) -> Bool {
+        guard !isSuspended else { return false }
         switch triggerMode {
         case .remappedF18:
             return handleRemappedF18(event, type: type)
         case .nativeFn:
             return handleNativeFn(event, type: type)
+        case .modifierKey(let keyCode, let mask):
+            return handleModifierKey(event, type: type, keyCode: keyCode, mask: mask)
+        case .comboKey(let keyCode, let requiredFlags):
+            return handleComboKey(event, type: type, keyCode: keyCode, requiredFlags: requiredFlags)
         }
     }
 
@@ -390,13 +451,13 @@ final class FnKeyMonitor {
         let keycode = event.getIntegerValueField(.keyboardEventKeycode)
         guard keycode == Self.remappedF18KeyCode else { return false }
 
-        if type == .keyDown && !fnIsDown {
-            fnIsDown = true
-            DispatchQueue.main.async { [weak self] in self?.onFnDown?() }
+        if type == .keyDown && !triggerIsDown {
+            triggerIsDown = true
+            DispatchQueue.main.async { [weak self] in self?.onHotkeyDown?() }
             return true
-        } else if type == .keyUp && fnIsDown {
-            fnIsDown = false
-            DispatchQueue.main.async { [weak self] in self?.onFnUp?() }
+        } else if type == .keyUp && triggerIsDown {
+            triggerIsDown = false
+            DispatchQueue.main.async { [weak self] in self?.onHotkeyUp?() }
             return true
         }
 
@@ -408,15 +469,15 @@ final class FnKeyMonitor {
         let flags = event.flags
 
         if keycode == Self.nativeFnGlobeKeyCode {
-            if type == .keyDown && !fnIsDown {
-                fnIsDown = true
+            if type == .keyDown && !triggerIsDown {
+                triggerIsDown = true
                 saveCurrentInputSource()
-                DispatchQueue.main.async { [weak self] in self?.onFnDown?() }
+                DispatchQueue.main.async { [weak self] in self?.onHotkeyDown?() }
                 return true
-            } else if type == .keyUp && fnIsDown {
-                fnIsDown = false
+            } else if type == .keyUp && triggerIsDown {
+                triggerIsDown = false
                 restoreInputSourceIfNeeded()
-                DispatchQueue.main.async { [weak self] in self?.onFnUp?() }
+                DispatchQueue.main.async { [weak self] in self?.onHotkeyUp?() }
                 return true
             }
             return true
@@ -424,20 +485,71 @@ final class FnKeyMonitor {
 
         if type == .flagsChanged {
             let isFnPressed = flags.contains(.maskSecondaryFn)
-            if isFnPressed && !fnIsDown {
-                fnIsDown = true
+            if isFnPressed && !triggerIsDown {
+                triggerIsDown = true
                 saveCurrentInputSource()
-                DispatchQueue.main.async { [weak self] in self?.onFnDown?() }
+                DispatchQueue.main.async { [weak self] in self?.onHotkeyDown?() }
                 return true
-            } else if !isFnPressed && fnIsDown {
-                fnIsDown = false
+            } else if !isFnPressed && triggerIsDown {
+                triggerIsDown = false
                 restoreInputSourceIfNeeded()
-                DispatchQueue.main.async { [weak self] in self?.onFnUp?() }
+                DispatchQueue.main.async { [weak self] in self?.onHotkeyUp?() }
                 return true
             }
         }
 
         return false
+    }
+
+    /// 单修饰键触发（如右 ⌘）：按 flagsChanged 的 keycode 精确匹配左右键，
+    /// 用对应掩码位判断按下/松开。该键自身的 flagsChanged 被吞掉。
+    private func handleModifierKey(
+        _ event: CGEvent, type: CGEventType, keyCode: Int64, mask: CGEventFlags
+    ) -> Bool {
+        guard type == .flagsChanged,
+              event.getIntegerValueField(.keyboardEventKeycode) == keyCode else {
+            return false
+        }
+
+        let pressed = event.flags.contains(mask)
+        if pressed && !triggerIsDown {
+            triggerIsDown = true
+            DispatchQueue.main.async { [weak self] in self?.onHotkeyDown?() }
+        } else if !pressed && triggerIsDown {
+            triggerIsDown = false
+            DispatchQueue.main.async { [weak self] in self?.onHotkeyUp?() }
+        }
+        return true
+    }
+
+    /// 普通键 / 组合键触发（如 F18、⌥Space）。keyDown 要求修饰键精确匹配；
+    /// keyUp 只看 keycode（此时修饰键可能已先松开）。自动重复的 keyDown 吞掉。
+    private func handleComboKey(
+        _ event: CGEvent, type: CGEventType, keyCode: Int64, requiredFlags: CGEventFlags
+    ) -> Bool {
+        guard type == .keyDown || type == .keyUp,
+              event.getIntegerValueField(.keyboardEventKeycode) == keyCode else {
+            return false
+        }
+
+        if type == .keyUp {
+            guard triggerIsDown else { return false }
+            triggerIsDown = false
+            DispatchQueue.main.async { [weak self] in self?.onHotkeyUp?() }
+            return true
+        }
+
+        if triggerIsDown {
+            return true // swallow auto-repeat while held
+        }
+
+        let standardModifiers: CGEventFlags = [.maskCommand, .maskAlternate, .maskControl, .maskShift]
+        guard event.flags.intersection(standardModifiers) == requiredFlags else { return false }
+        guard event.getIntegerValueField(.keyboardEventAutorepeat) == 0 else { return false }
+
+        triggerIsDown = true
+        DispatchQueue.main.async { [weak self] in self?.onHotkeyDown?() }
+        return true
     }
 }
 
@@ -449,7 +561,7 @@ private func fnKeyCallback(
 ) -> Unmanaged<CGEvent>? {
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
         if let userInfo = userInfo {
-            let monitor = Unmanaged<FnKeyMonitor>.fromOpaque(userInfo).takeUnretainedValue()
+            let monitor = Unmanaged<HotkeyMonitor>.fromOpaque(userInfo).takeUnretainedValue()
             if let tap = monitor.eventTap {
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
@@ -462,7 +574,7 @@ private func fnKeyCallback(
         return Unmanaged.passUnretained(event)
     }
 
-    let monitor = Unmanaged<FnKeyMonitor>.fromOpaque(userInfo).takeUnretainedValue()
+    let monitor = Unmanaged<HotkeyMonitor>.fromOpaque(userInfo).takeUnretainedValue()
     let shouldSuppress = monitor.handleEvent(event, type: type)
 
     if shouldSuppress {

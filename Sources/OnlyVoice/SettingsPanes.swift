@@ -2,10 +2,11 @@ import AppKit
 import Observation
 import SwiftUI
 
-// MARK: - General (spoken language)
+// MARK: - General (recording hotkey + spoken language)
 
 struct GeneralSettingsPane: View {
     @AppStorage("selected_language") private var language = "zh-CN"
+    @AppStorage(AppDelegate.holdToRecordKey) private var holdToRecord = false
 
     private let languages: [(code: String, name: String)] = [
         ("zh-CN", "简体中文"),
@@ -17,6 +18,19 @@ struct GeneralSettingsPane: View {
 
     var body: some View {
         Form {
+            Section {
+                LabeledContent("Shortcut") {
+                    HotkeyRecorderField()
+                }
+                Toggle("Hold to record", isOn: $holdToRecord)
+            } header: {
+                Text("Recording")
+            } footer: {
+                Text("Tap the shortcut to start recording, tap again to stop. With \"Hold to record\" on, holding the shortcut records until you release it.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section {
                 Picker("Spoken Language", selection: $language) {
                     ForEach(languages, id: \.code) { lang in
@@ -38,6 +52,123 @@ struct GeneralSettingsPane: View {
         .onChange(of: language) { _, _ in
             NotificationCenter.default.post(name: .spokenLanguageChanged, object: nil)
         }
+    }
+}
+
+// MARK: - Hotkey recorder
+
+/// 录音快捷键录制控件：点击进入捕获态，按下目标键完成设置，Esc 取消。
+/// 捕获期间通过 .hotkeyCaptureStateChanged 通知 HotkeyMonitor 暂停全局匹配。
+/// 注意：当前快捷键为 Fn 时系统层 remap（Fn→F18）仍然生效，
+/// 此时按 Fn 会以 F18(79) keyDown 的形式到达，需要识别回 Fn。
+struct HotkeyRecorderField: View {
+    @State private var hotkey = RecordingHotkey.current
+    @State private var capturing = false
+    @State private var hint: String?
+    @State private var eventMonitor: Any?
+    @State private var pendingModifierKeyCode: Int64?
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let hint, capturing {
+                Text(hint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !capturing && hotkey != .fn {
+                Button {
+                    commit(.fn, notify: true)
+                } label: {
+                    Image(systemName: "arrow.uturn.backward")
+                }
+                .buttonStyle(.borderless)
+                .help("Reset to Fn")
+            }
+
+            Button {
+                capturing ? finishCapture() : beginCapture()
+            } label: {
+                Text(capturing ? "Press a key…" : hotkey.displayName)
+                    .frame(minWidth: 96)
+            }
+        }
+        .onDisappear {
+            if capturing { finishCapture() }
+        }
+    }
+
+    private func beginCapture() {
+        capturing = true
+        hint = "Esc to cancel"
+        pendingModifierKeyCode = nil
+        NotificationCenter.default.post(
+            name: .hotkeyCaptureStateChanged, object: nil, userInfo: ["capturing": true])
+
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
+            handle(event)
+            return nil // swallow while capturing
+        }
+    }
+
+    private func handle(_ event: NSEvent) {
+        let keyCode = Int64(event.keyCode)
+
+        if event.type == .flagsChanged {
+            guard let flag = KeyNames.modifierFlag(for: keyCode) else { return }
+            if event.modifierFlags.contains(flag) {
+                // Modifier pressed: candidate for a lone-modifier hotkey.
+                pendingModifierKeyCode = keyCode
+            } else if pendingModifierKeyCode == keyCode {
+                // Released without any other key in between → lone modifier.
+                commit(keyCode == 63 ? .fn : .modifier(keyCode: keyCode))
+            }
+            return
+        }
+
+        // keyDown
+        let mods = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        pendingModifierKeyCode = nil
+
+        if keyCode == 53 && mods.isEmpty {
+            finishCapture()
+            return
+        }
+        // Fn remap 生效时，物理 Fn 到达此处是 F18。
+        if keyCode == 79 && mods.isEmpty
+            && UserDefaults.standard.bool(forKey: HotkeyMonitor.remapDefaultsKey) {
+            commit(.fn)
+            return
+        }
+        if mods.isEmpty && !RecordingHotkey.isAllowedBareKey(keyCode) {
+            hint = "Add a modifier (bare keys: F1–F20 only)"
+            return
+        }
+        commit(.key(keyCode: keyCode, modifiers: mods.rawValue))
+    }
+
+    private func commit(_ newHotkey: RecordingHotkey, notify: Bool = false) {
+        hotkey = newHotkey
+        newHotkey.save()
+        if capturing {
+            finishCapture()
+        } else if notify {
+            // Reset 按钮不经过捕获态，单独通知 monitor 重载快捷键。
+            NotificationCenter.default.post(
+                name: .hotkeyCaptureStateChanged, object: nil, userInfo: ["capturing": false])
+        }
+    }
+
+    private func finishCapture() {
+        if let eventMonitor {
+            NSEvent.removeMonitor(eventMonitor)
+        }
+        eventMonitor = nil
+        capturing = false
+        hint = nil
+        pendingModifierKeyCode = nil
+        NotificationCenter.default.post(
+            name: .hotkeyCaptureStateChanged, object: nil, userInfo: ["capturing": false])
     }
 }
 
@@ -278,7 +409,7 @@ struct AboutSettingsPane: View {
                         Text(versionText)
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
-                        Text("Hold Fn to record, release to transcribe.")
+                        Text("Tap the recording shortcut (default Fn) to dictate.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }

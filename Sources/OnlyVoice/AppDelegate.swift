@@ -5,7 +5,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let audioEngine = AudioEngine()
     private let realtimeClient = RealtimeClient()
-    private let fnMonitor = FnKeyMonitor()
+    private let hotkeyMonitor = HotkeyMonitor()
     private let capsulePanel = CapsulePanel()
     private let textInjector = TextInjector()
     private var providerMenu: NSMenu?
@@ -19,15 +19,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 已提交后等待响应阶段的自动重试次数。
     private var responseReconnectCount = 0
 
-    // Recording mode: hold-to-talk vs tap-to-toggle.
-    // - Press Fn → startRecording, enter .holding
-    // - Release Fn quickly (< tapThreshold) → stay recording in .toggled
-    // - Release Fn after long hold → stopRecording
-    // - Next Fn press while .toggled → stopRecording
+    // Recording mode: tap-to-toggle, optionally hold-to-talk.
+    // - Press hotkey → startRecording, enter .holding
+    // - Release quickly (< tapThreshold) → stay recording in .toggled
+    // - Release after long hold → stopRecording (only when hold-to-record is enabled)
+    // - Next hotkey press while .toggled → stopRecording
     private enum RecordMode { case idle, holding, toggled }
     private var recordMode: RecordMode = .idle
-    private var fnDownAt: CFTimeInterval = 0
+    private var hotkeyDownAt: CFTimeInterval = 0
     private let tapThreshold: CFTimeInterval = 0.4
+    static let holdToRecordKey = "hold_to_record_enabled"
 
     private let startSound = AppDelegate.loadSound(named: "record-start")
     private let endSound = AppDelegate.loadSound(named: "record-end")
@@ -50,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Register defaults
         UserDefaults.standard.register(defaults: [
             "selected_language": "zh-CN",
+            Self.holdToRecordKey: false,
             RealtimeProvider.selectionKey: RealtimeProvider.dashscope.rawValue,
             RealtimeProvider.dashscope.modelDefaultsKey: RealtimeProvider.dashscope.defaultModel,
             RealtimeProvider.stepfun.modelDefaultsKey: RealtimeProvider.stepfun.defaultModel
@@ -58,7 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         setupMainMenu()
         setupStatusBar()
-        setupFnMonitor()
+        setupHotkeyMonitor()
         setupRealtimeCallbacks()
         NotificationCenter.default.addObserver(
             self, selector: #selector(refreshProviderMenuState),
@@ -66,11 +68,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(
             self, selector: #selector(refreshLanguageMenuState),
             name: .spokenLanguageChanged, object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(hotkeyCaptureStateChanged(_:)),
+            name: .hotkeyCaptureStateChanged, object: nil)
         requestMicrophonePermission()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        fnMonitor.stop()
+        hotkeyMonitor.stop()
     }
 
     // MARK: - Status Bar
@@ -223,22 +228,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.terminate(nil)
     }
 
-    // MARK: - Fn Key Monitor
+    // MARK: - Hotkey Monitor
 
-    private func setupFnMonitor() {
-        fnMonitor.onFnDown = { [weak self] in
-            self?.handleFnDown()
+    private func setupHotkeyMonitor() {
+        hotkeyMonitor.onHotkeyDown = { [weak self] in
+            self?.handleHotkeyDown()
         }
-        fnMonitor.onFnUp = { [weak self] in
-            self?.handleFnUp()
+        hotkeyMonitor.onHotkeyUp = { [weak self] in
+            self?.handleHotkeyUp()
         }
-        fnMonitor.onPermissionRequired = { [weak self] in
+        hotkeyMonitor.onPermissionRequired = { [weak self] in
             self?.updateStatusIcon(permissionNeeded: true)
         }
-        fnMonitor.onPermissionGranted = { [weak self] in
+        hotkeyMonitor.onPermissionGranted = { [weak self] in
             self?.updateStatusIcon(permissionNeeded: false)
         }
-        fnMonitor.start()
+        hotkeyMonitor.start()
+    }
+
+    /// 设置界面录制快捷键期间暂停全局监听，避免按键被当作录音触发。
+    @objc private func hotkeyCaptureStateChanged(_ note: Notification) {
+        if (note.userInfo?["capturing"] as? Bool) == true {
+            hotkeyMonitor.suspendMonitoring()
+        } else {
+            hotkeyMonitor.resumeMonitoring()
+        }
     }
 
     // MARK: - Realtime Callbacks
@@ -301,10 +315,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Recording
 
-    private func handleFnDown() {
+    private func handleHotkeyDown() {
         switch recordMode {
         case .idle:
-            fnDownAt = CACurrentMediaTime()
+            hotkeyDownAt = CACurrentMediaTime()
             recordMode = .holding
             startRecording()
         case .toggled:
@@ -312,20 +326,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             recordMode = .idle
             stopRecording()
         case .holding:
-            break // shouldn't happen (Fn already down)
+            break // shouldn't happen (hotkey already down)
         }
     }
 
-    private func handleFnUp() {
+    private func handleHotkeyUp() {
         switch recordMode {
         case .holding:
-            let held = CACurrentMediaTime() - fnDownAt
-            if held < tapThreshold {
-                // Treat as tap: keep recording until next Fn press.
-                recordMode = .toggled
-            } else {
+            let held = CACurrentMediaTime() - hotkeyDownAt
+            let holdEnabled = UserDefaults.standard.bool(forKey: Self.holdToRecordKey)
+            if holdEnabled && held >= tapThreshold {
+                // Hold-to-record: releasing after a long hold stops recording.
                 recordMode = .idle
                 stopRecording()
+            } else {
+                // Tap (or hold-to-record disabled): keep recording until next press.
+                recordMode = .toggled
             }
         case .toggled, .idle:
             break
