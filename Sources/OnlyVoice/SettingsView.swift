@@ -37,16 +37,6 @@ final class SettingsNavigation {
     private init() {}
 }
 
-// MARK: - Version helper
-
-enum AppVersion {
-    static let displayString: String = {
-        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0"
-        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
-        return "Version \(version) (\(build))"
-    }()
-}
-
 // MARK: - Root view
 
 struct SettingsView: View {
@@ -127,16 +117,6 @@ private struct SettingsSidebarView: View {
                 .foregroundStyle(.primary)
                 .tag(tab)
             }
-
-            Text(AppVersion.displayString)
-                .font(.footnote)
-                .foregroundStyle(.tertiary)
-                .fontDesign(.monospaced)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 8)
-                .listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 6, trailing: 0))
         }
         .listStyle(.sidebar)
         .scrollEdgeEffectStyleSoftIfAvailable()
