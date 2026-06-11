@@ -7,6 +7,7 @@ import SwiftUI
 struct GeneralSettingsPane: View {
     @AppStorage("selected_language") private var language = "zh-CN"
     @AppStorage(AppDelegate.holdToRecordKey) private var holdToRecord = false
+    @AppStorage(AppDelegate.liveDictationKey) private var liveDictation = true
 
     private let languages: [(code: String, name: String)] = [
         ("zh-CN", "简体中文"),
@@ -38,12 +39,16 @@ struct GeneralSettingsPane: View {
                     }
                 }
                 .pickerStyle(.menu)
+                Toggle("Live dictation", isOn: $liveDictation)
             } header: {
                 Text("Transcription")
             } footer: {
-                Text("The language you speak when dictating — not the app's interface language.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("The language you speak when dictating — not the app's interface language.")
+                    Text("Live dictation shows an instant on-device transcription preview in the floating capsule while you speak; the text injected into your app is always the cloud result. Offline, requires Speech Recognition permission.")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

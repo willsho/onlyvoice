@@ -10,6 +10,9 @@ final class AudioEngine {
     var onAudioData: ((String) -> Void)?
     /// Called with current RMS level (0.0–1.0) for waveform visualization.
     var onRMSLevel: ((Float) -> Void)?
+    /// Called with the raw hardware-format buffer for local speech recognition.
+    /// Fired alongside the PCM16 conversion; SFSpeech resamples internally.
+    var onPCMBuffer: ((AVAudioPCMBuffer) -> Void)?
 
     /// Audio format: 16kHz mono PCM16
     private let sampleRate: Double = 16000
@@ -43,6 +46,7 @@ final class AudioEngine {
 
         // Tap MUST use the input node's native hardware format; convert inside the callback.
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [weak self] buffer, _ in
+            self?.onPCMBuffer?(buffer)
             self?.handleInputBuffer(buffer)
         }
 
@@ -94,8 +98,9 @@ final class AudioEngine {
             sumSquares += s * s
         }
         let rms = sqrt(sumSquares / Float(max(frameCount, 1)))
-        // Normalize RMS to 0–1 range (typical speech RMS ~0.01–0.1)
-        let normalizedRMS = min(1.0, rms * 10.0)
+        // Normalize RMS to 0–1 range (typical speech RMS ~0.01–0.1).
+        // 系数偏大让正常说话音量也能推动波形明显起伏。
+        let normalizedRMS = min(1.0, rms * 14.0)
         DispatchQueue.main.async { [weak self] in
             self?.onRMSLevel?(normalizedRMS)
         }

@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let hotkeyMonitor = HotkeyMonitor()
     private let capsulePanel = CapsulePanel()
     private let textInjector = TextInjector()
+    private let localRecognizer = LocalSpeechRecognizer()
     private var providerMenu: NSMenu?
     private var languageMenu: NSMenu?
 
@@ -29,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotkeyDownAt: CFTimeInterval = 0
     private let tapThreshold: CFTimeInterval = 0.4
     static let holdToRecordKey = "hold_to_record_enabled"
+    static let liveDictationKey = "live_dictation_enabled"
 
     private let startSound = AppDelegate.loadSound(named: "record-start")
     private let endSound = AppDelegate.loadSound(named: "record-end")
@@ -52,6 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UserDefaults.standard.register(defaults: [
             "selected_language": "zh-CN",
             Self.holdToRecordKey: false,
+            Self.liveDictationKey: true,
             RealtimeProvider.selectionKey: RealtimeProvider.dashscope.rawValue,
             RealtimeProvider.dashscope.modelDefaultsKey: RealtimeProvider.dashscope.defaultModel,
             RealtimeProvider.stepfun.modelDefaultsKey: RealtimeProvider.stepfun.defaultModel
@@ -72,6 +75,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self, selector: #selector(hotkeyCaptureStateChanged(_:)),
             name: .hotkeyCaptureStateChanged, object: nil)
         requestMicrophonePermission()
+        if UserDefaults.standard.bool(forKey: Self.liveDictationKey) {
+            LocalSpeechRecognizer.requestAuthorization()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -259,8 +265,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupRealtimeCallbacks() {
         realtimeClient.onTranscript = { [weak self] text in
-            self?.pendingTranscript = text
-            self?.capsulePanel.updateTranscript(text)
+            guard let self = self else { return }
+            self.pendingTranscript = text
+            // 松手后进入「转换中」阶段：不再用云端流式结果逐字回放整句，
+            // 保持转换状态提示，直到最终结果到达再注入。
+            guard !self.waitingForResponse else { return }
+            self.capsulePanel.updateTranscript(text)
         }
 
         realtimeClient.onFinalTranscript = { [weak self] text in
@@ -269,7 +279,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.responseReconnectCount = 0
             self.pendingTranscript = text
 
-            // Hide panel then inject text
+            // Hide panel then inject the cloud result.
             self.capsulePanel.hide { [weak self] in
                 guard let self = self else { return }
                 if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -373,13 +383,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.realtimeClient.sendAudioData(base64Audio)
         }
 
+        // Local on-device live preview: show an instant transcription in the
+        // floating capsule while recording (cloud result still injects on stop).
+        setupLiveDictation()
+
         do {
             try audioEngine.start()
         } catch {
             print("[OnlyVoice] Audio engine start failed: \(error)")
             capsulePanel.updateTranscript("⚠ Microphone error")
+            localRecognizer.stop()
             isRecording = false
             updateStatusIcon(recording: false)
+        }
+    }
+
+    /// 若开关开启且本地离线识别可用，则启动实时听写，把识别结果实时显示在悬浮胶囊里。
+    /// SFSpeech 的 partial 会整句重写，不适合逐字注入输入框，因此只驱动胶囊预览；
+    /// 输入框始终由录音结束时的云端结果一次性注入。不可用时静默回退（胶囊无实时预览）。
+    private func setupLiveDictation() {
+        audioEngine.onPCMBuffer = nil
+        localRecognizer.onPartial = nil
+
+        guard UserDefaults.standard.bool(forKey: Self.liveDictationKey) else { return }
+        let localeID = UserDefaults.standard.string(forKey: "selected_language") ?? "zh-CN"
+        guard localRecognizer.start(localeID: localeID) else {
+            print("[OnlyVoice] on-device speech unavailable for \(localeID); falling back")
+            return
+        }
+        audioEngine.onPCMBuffer = { [weak self] buffer in
+            self?.localRecognizer.append(buffer)
+        }
+        localRecognizer.onPartial = { [weak self] text in
+            self?.capsulePanel.updateTranscript(text)
         }
     }
 
@@ -389,6 +425,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recordMode = .idle
 
         audioEngine.stop()
+        localRecognizer.stop()
         endSound?.stop()
         endSound?.play()
         responseReconnectCount = 0
@@ -406,11 +443,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         waitingForResponse = true
         realtimeClient.commitAudioBuffer()
 
-        // Update UI to show "processing"
+        // 松手即进入「转换中」状态，不再回放云端流式结果。
         capsulePanel.updateRMS(0)
-        if pendingTranscript.isEmpty {
-            capsulePanel.updateTranscript("Processing...")
-        }
+        capsulePanel.updateTranscript("Converting…")
 
         // Timeout: if no response in 10 seconds, hide and cleanup
         DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) { [weak self] in

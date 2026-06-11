@@ -15,7 +15,7 @@ final class CapsulePanel {
     private let cornerRadius: CGFloat = 28
     private let waveformSize = NSSize(width: 44, height: 32)
     private let minTextWidth: CGFloat = 160
-    private let maxTextWidth: CGFloat = 560
+    private let maxTextWidth: CGFloat = 420
     private let horizontalPadding: CGFloat = 20
     private let elementSpacing: CGFloat = 12
 
@@ -87,7 +87,8 @@ final class CapsulePanel {
         let label = NSTextField(labelWithString: "")
         label.font = NSFont.systemFont(ofSize: 15, weight: .medium)
         label.textColor = contentColor
-        label.lineBreakMode = .byTruncatingTail
+        // 头部截断：文字超过胶囊最大宽度时省略开头、始终显示最新说出的字。
+        label.lineBreakMode = .byTruncatingHead
         label.maximumNumberOfLines = 1
         label.translatesAutoresizingMaskIntoConstraints = false
         contentHost.addSubview(label)
